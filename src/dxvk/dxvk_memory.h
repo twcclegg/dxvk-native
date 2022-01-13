@@ -210,6 +210,12 @@ namespace dxvk {
      */
     bool isEmpty() const;
 
+    /**
+     * \brief Checks whether hints and flags of another chunk match
+     * \param [in] other The chunk to compare to
+     */
+    bool isCompatible(const Rc<DxvkMemoryChunk>& other) const;
+
   private:
     
     struct FreeSlice {
@@ -328,6 +334,17 @@ namespace dxvk {
     
     VkDeviceSize pickChunkSize(
             uint32_t              memTypeId) const;
+
+    bool shouldFreeChunk(
+      const DxvkMemoryType*       type,
+      const Rc<DxvkMemoryChunk>&  chunk) const;
+
+    bool shouldFreeEmptyChunks(
+      const DxvkMemoryHeap*       heap,
+            VkDeviceSize          allocationSize) const;
+
+    void freeEmptyChunks(
+      const DxvkMemoryHeap*       heap);
 
   };
   
