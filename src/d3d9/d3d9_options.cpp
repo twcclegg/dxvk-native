@@ -61,7 +61,7 @@ namespace dxvk {
     this->swvpIntCount                  = config.getOption<int32_t>     ("d3d9.swvpIntCount",                  caps::MaxOtherConstantsSoftware);
     this->swvpBoolCount                 = config.getOption<int32_t>     ("d3d9.swvpBoolCount",                 caps::MaxOtherConstantsSoftware);
     this->disableA8RT                   = config.getOption<bool>        ("d3d9.disableA8RT",                   false);
-    this->invariantPosition             = config.getOption<bool>        ("d3d9.invariantPosition",             false);
+    this->invariantPosition             = config.getOption<bool>        ("d3d9.invariantPosition",             true);
     this->memoryTrackTest               = config.getOption<bool>        ("d3d9.memoryTrackTest",               false);
     this->supportVCache                 = config.getOption<bool>        ("d3d9.supportVCache",                 vendorId == 0x10de);
     this->enableDialogMode              = config.getOption<bool>        ("d3d9.enableDialogMode",              false);
