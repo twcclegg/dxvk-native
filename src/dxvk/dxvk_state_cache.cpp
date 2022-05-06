@@ -381,8 +381,10 @@ namespace dxvk {
         if (entry.format.viewMask && !m_multiview)
           continue;
 
-        auto rp = m_passManager->getRenderPass(entry.format);
-        pipeline->compilePipeline(entry.gpState, rp);
+        if (m_passManager->validateRenderPassFormat(entry.format)) {
+          auto rp = m_passManager->getRenderPass(entry.format);
+          pipeline->compilePipeline(entry.gpState, rp);
+        }
       }
     } else {
       auto pipeline = m_pipeManager->createComputePipeline(item.cp);
