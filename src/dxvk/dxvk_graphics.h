@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <mutex>
 
 #include "dxvk_bind_mask.h"
@@ -219,13 +220,19 @@ namespace dxvk {
     DxvkGraphicsPipelineFlags           m_flags;
     DxvkGraphicsCommonPipelineStateInfo m_common;
     
-    // List of pipeline instances, shared between threads
-    alignas(CACHE_LINE_SIZE) sync::Spinlock   m_mutex;
-    std::vector<DxvkGraphicsPipelineInstance> m_pipelines;
-    
-    DxvkGraphicsPipelineInstance* createInstance(
+    // List of pipeline instances, shared between threads. Instances are
+    // compiled outside the lock: a thread that needs one waits only for
+    // that instance (m_pending), not for whatever a state cache worker
+    // happens to be compiling for the same shaders.
+    alignas(CACHE_LINE_SIZE) dxvk::mutex      m_mutex;
+    dxvk::condition_variable                  m_cond;
+    std::deque<DxvkGraphicsPipelineInstance>  m_pipelines;
+    std::vector<DxvkGraphicsPipelineInstance> m_pending;
+
+    DxvkGraphicsPipelineInstance* getInstance(
       const DxvkGraphicsPipelineStateInfo& state,
-      const DxvkRenderPass*                renderPass);
+      const DxvkRenderPass*                renderPass,
+            bool*                          created);
     
     DxvkGraphicsPipelineInstance* findInstance(
       const DxvkGraphicsPipelineStateInfo& state,
