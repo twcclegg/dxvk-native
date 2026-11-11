@@ -147,7 +147,10 @@ target_compile_options(dxvk_d3d9 PRIVATE -O2 "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-i
 if(APPLE)
   set_property(TARGET dxvk_d3d9 PROPERTY NO_SYSTEM_FROM_IMPORTED TRUE)
   target_link_libraries(dxvk_d3d9 PRIVATE SDL2 Vulkan::Vulkan)
-  target_include_directories(dxvk_d3d9 BEFORE PRIVATE "${SKYRIM_MOLTENVK_ROOT}/include")
+  # The embedding build points this at its MoltenVK headers so they win over any system Vulkan headers.
+  if(DXVK_VULKAN_INCLUDE_DIR)
+    target_include_directories(dxvk_d3d9 BEFORE PRIVATE "${DXVK_VULKAN_INCLUDE_DIR}")
+  endif()
 else()
   target_link_libraries(dxvk_d3d9 PRIVATE SDL2 vulkan $<$<BOOL:${ANDROID}>:log>)
 endif()

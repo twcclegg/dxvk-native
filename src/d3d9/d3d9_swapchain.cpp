@@ -8,10 +8,10 @@
 #include "d3d9_hud.h"
 
 #if defined(__APPLE__)
-#include "skyrim_present_tap.h"
+#include "dxvk_present_tap.h"
 
 namespace {
-  std::atomic<skyrim_present_tap_fn> g_presentTapFn   = { nullptr };
+  std::atomic<dxvk_present_tap_fn> g_presentTapFn   = { nullptr };
   std::atomic<void*>                 g_presentTapUser = { nullptr };
   std::atomic<bool>                  g_presentTapExclusive = { false };
   std::atomic<IDirect3DSurface9*>    g_presentTapDepth = { nullptr };
@@ -276,7 +276,7 @@ namespace dxvk {
     D3D9DeviceLock lock = m_parent->LockDevice();
 
 #ifdef __APPLE__
-    // Skyrim Apple port: GPU load for the device log every ~10 s, from DXVK's own GPU idle counter (the time its
+    // Apple port (twcclegg/dxvk-native): GPU load for the device log every ~10 s, from DXVK's own GPU idle counter (the time its
     // submission queue waited on fences with nothing else to do), as the HUD's gpuload item computes it.
     {
       static auto     lastTime  = dxvk::high_resolution_clock::now();
@@ -1074,7 +1074,7 @@ namespace dxvk {
 
   void D3D9SwapChainEx::NotifyPresentTap(uint32_t Slot) {
     D3D9PresentTapState* state = m_presentTapState.ptr();
-    skyrim_present_tap_fn fn = g_presentTapFn.load(std::memory_order_acquire);
+    dxvk_present_tap_fn fn = g_presentTapFn.load(std::memory_order_acquire);
 
     if (fn == nullptr) {
       // Callback cleared between record and notify: the copy is harmless, just free the slot.
@@ -1084,7 +1084,7 @@ namespace dxvk {
 
     const DxvkImageCreateInfo& info = state->images[Slot]->info();
 
-    skyrim_present_tap_frame frame = { };
+    dxvk_present_tap_frame frame = { };
     frame.vk_device = reinterpret_cast<void*>(m_device->handle());
     frame.vk_queue  = reinterpret_cast<void*>(m_device->queues().graphics.queueHandle);
     frame.vk_image  = uint64_t(reinterpret_cast<uintptr_t>(state->images[Slot]->handle()));
@@ -1102,7 +1102,7 @@ namespace dxvk {
       frame.depth_vk_format = uint32_t(depth.format);
     }
 
-    state->incRef(); // dropped by skyrim_present_tap_release
+    state->incRef(); // dropped by dxvk_present_tap_release
     fn(g_presentTapUser.load(std::memory_order_acquire), &frame);
   }
 
@@ -1586,19 +1586,19 @@ namespace dxvk {
 
 
 #if defined(__APPLE__)
-extern "C" void skyrim_present_tap_set(skyrim_present_tap_fn fn, void* user) {
+extern "C" void dxvk_present_tap_set(dxvk_present_tap_fn fn, void* user) {
   g_presentTapUser.store(user, std::memory_order_release);
   g_presentTapFn.store(fn, std::memory_order_release);
 }
 
 
-extern "C" void skyrim_present_tap_wait(void* state, uint64_t frame_id) {
+extern "C" void dxvk_present_tap_wait(void* state, uint64_t frame_id) {
   auto* s = static_cast<dxvk::D3D9PresentTapState*>(state);
   s->fence->wait(frame_id);
 }
 
 
-extern "C" void skyrim_present_tap_release(void* state, uint32_t slot) {
+extern "C" void dxvk_present_tap_release(void* state, uint32_t slot) {
   auto* s = static_cast<dxvk::D3D9PresentTapState*>(state);
   s->busy[slot].store(false, std::memory_order_release);
   if (s->decRef() == 0)
@@ -1606,18 +1606,18 @@ extern "C" void skyrim_present_tap_release(void* state, uint32_t slot) {
 }
 
 
-extern "C" int skyrim_present_tap_ready(void* state, uint64_t frame_id) {
+extern "C" int dxvk_present_tap_ready(void* state, uint64_t frame_id) {
   auto* s = static_cast<dxvk::D3D9PresentTapState*>(state);
   return s->fence->value() >= frame_id ? 1 : 0;
 }
 
 
-extern "C" void skyrim_present_tap_set_depth(void* surface) {
+extern "C" void dxvk_present_tap_set_depth(void* surface) {
   g_presentTapDepth.store(static_cast<IDirect3DSurface9*>(surface), std::memory_order_release);
 }
 
 
-extern "C" void skyrim_present_tap_set_exclusive(int on) {
+extern "C" void dxvk_present_tap_set_exclusive(int on) {
   g_presentTapExclusive.store(on != 0, std::memory_order_release);
 }
 #endif

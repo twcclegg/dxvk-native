@@ -40,7 +40,7 @@ namespace dxvk::env {
   void setThreadName(const std::string& name) {
 #ifdef __APPLE__
     pthread_setname_np(name.substr(0, 63).c_str());
-    // Skyrim Apple port: LB_QOS=1 puts DXVK's frame-critical threads (command stream, submission, queue) in the
+    // Apple port (twcclegg/dxvk-native): LB_QOS=1 puts DXVK's frame-critical threads (command stream, submission, queue) in the
     // user-interactive QoS class, so the scheduler keeps them on performance cores; others stay as they are.
     const char* qos = std::getenv("LB_QOS");
     if (qos && (qos[0] >= '1' && qos[0] <= '3') && (name == "dxvk-cs" || name == "dxvk-submit" || name == "dxvk-queue")) {

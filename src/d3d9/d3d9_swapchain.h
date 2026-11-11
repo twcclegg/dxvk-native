@@ -25,7 +25,7 @@ namespace dxvk {
 
 #if defined(__APPLE__)
   /**
-   * \brief Skyrim Apple port: present-tap slots shared with the consumer
+   * \brief Apple port (twcclegg/dxvk-native): present-tap slots shared with the consumer
    *
    * Owned by the swap chain and by every frame handed to the consumer, so the images
    * outlive a back-buffer resize until the consumer has released them.
@@ -38,7 +38,7 @@ namespace dxvk {
     std::array<Rc<DxvkImage>, Slots>     images;
     std::array<std::atomic<bool>, Slots> busy = { };
     // The scene's depth (an R32F colour target the game renders), copied next to the colour image when the
-    // runtime names one for this Present (skyrim_present_tap_set_depth). Created on first use.
+    // runtime names one for this Present (dxvk_present_tap_set_depth). Created on first use.
     std::array<Rc<DxvkImage>, Slots>     depthImages;
     std::array<bool, Slots>              hasDepth = { };
   };
@@ -154,7 +154,7 @@ namespace dxvk {
     void PresentImage(UINT PresentInterval);
 
 #if defined(__APPLE__)
-    // Skyrim Apple port: present tap (LB_PRESENT_TAP=1), see include/native/skyrim_present_tap.h.
+    // Apple port (twcclegg/dxvk-native): present tap (LB_PRESENT_TAP=1), see include/native/dxvk_present_tap.h.
     bool                    m_presentTap     = false;
     uint32_t                m_presentTapNext = 0;
     Rc<D3D9PresentTapState> m_presentTapState;
