@@ -13,11 +13,50 @@ namespace dxvk {
     
     if (useStateCache != "0" && device->config().enableStateCache)
       m_stateCache = new DxvkStateCache(device, this, passManager);
+
+    if (env::getEnvVar("DXVK_ASYNC") == "1") {
+      m_async = true;
+      for (uint32_t i = 0; i < 2; i++)
+        m_asyncThreads.emplace_back([this] () { asyncWorker(); });
+      Logger::info("DXVK: draw-time pipelines compile in the background (DXVK_ASYNC=1)");
+    }
   }
   
   
   DxvkPipelineManager::~DxvkPipelineManager() {
-    
+    this->stopWorkerThreads();
+  }
+
+
+  void DxvkPipelineManager::compileAsync(
+          DxvkGraphicsPipeline*          pipeline,
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPass*                renderPass) {
+    { std::lock_guard<dxvk::mutex> lock(m_asyncMutex);
+      m_asyncQueue.push({ pipeline, state, renderPass });
+    }
+    m_asyncCond.notify_one();
+  }
+
+
+  void DxvkPipelineManager::asyncWorker() {
+    env::setThreadName("dxvk-async");
+
+    for (;;) {
+      AsyncItem item;
+
+      { std::unique_lock<dxvk::mutex> lock(m_asyncMutex);
+        m_asyncCond.wait(lock, [this] { return m_asyncStop || !m_asyncQueue.empty(); });
+
+        if (m_asyncStop)
+          return;
+
+        item = m_asyncQueue.front();
+        m_asyncQueue.pop();
+      }
+
+      item.pipeline->compileQueued(item.state, item.renderPass);
+    }
   }
   
   
@@ -83,6 +122,15 @@ namespace dxvk {
   void DxvkPipelineManager::stopWorkerThreads() const {
     if (m_stateCache != nullptr)
       m_stateCache->stopWorkerThreads();
+
+    { std::lock_guard<dxvk::mutex> lock(m_asyncMutex);
+      m_asyncStop = true;
+    }
+    m_asyncCond.notify_all();
+
+    for (auto& thread : m_asyncThreads)
+      thread.join();
+    m_asyncThreads.clear();
   }
   
 }

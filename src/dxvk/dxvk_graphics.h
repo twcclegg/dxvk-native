@@ -189,8 +189,18 @@ namespace dxvk {
      * \returns Pipeline handle
      */
     VkPipeline getPipelineHandle(
-      const DxvkGraphicsPipelineStateInfo&    state,
-      const DxvkRenderPass*                   renderPass);
+      const DxvkGraphicsPipelineStateInfo& state,
+      const DxvkRenderPass*                renderPass,
+            bool                           async = false);
+
+    /**
+     * \brief Compiles an instance queued by an async lookup
+     *
+     * Called by the background compiler only.
+     */
+    void compileQueued(
+      const DxvkGraphicsPipelineStateInfo& state,
+      const DxvkRenderPass*                renderPass);
     
     /**
      * \brief Compiles a pipeline
@@ -228,6 +238,7 @@ namespace dxvk {
     dxvk::condition_variable                  m_cond;
     std::deque<DxvkGraphicsPipelineInstance>  m_pipelines;
     std::vector<DxvkGraphicsPipelineInstance> m_pending;
+    std::vector<DxvkGraphicsPipelineInstance> m_queued;   // handed to the background compiler
 
     DxvkGraphicsPipelineInstance* getInstance(
       const DxvkGraphicsPipelineStateInfo& state,

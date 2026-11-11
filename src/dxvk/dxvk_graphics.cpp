@@ -62,7 +62,38 @@ namespace dxvk {
 
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) {
+    const DxvkRenderPass*                renderPass,
+          bool                           async) {
+    if (async && m_pipeMgr->asyncEnabled()) {
+      // Never stall the caller: if the instance isn't there yet, make
+      // sure a worker is compiling it and let the caller skip the draw.
+      { std::lock_guard<dxvk::mutex> lock(m_mutex);
+
+        DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+
+        if (instance)
+          return instance->pipeline();
+
+        for (auto& p : m_pending) {
+          if (p.isCompatible(state, renderPass))
+            return VK_NULL_HANDLE;
+        }
+
+        for (auto& p : m_queued) {
+          if (p.isCompatible(state, renderPass))
+            return VK_NULL_HANDLE;
+        }
+
+        if (!this->validatePipelineState(state))
+          return VK_NULL_HANDLE;
+
+        m_queued.emplace_back(state, renderPass, VK_NULL_HANDLE);
+      }
+
+      m_pipeMgr->compileAsync(this, state, renderPass);
+      return VK_NULL_HANDLE;
+    }
+
     bool created = false;
     DxvkGraphicsPipelineInstance* instance = this->getInstance(state, renderPass, &created);
 
@@ -80,6 +111,28 @@ namespace dxvk {
     const DxvkRenderPass*                renderPass) {
     bool created = false;
     this->getInstance(state, renderPass, &created);
+  }
+
+
+  void DxvkGraphicsPipeline::compileQueued(
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPass*                renderPass) {
+    bool created = false;
+    this->getInstance(state, renderPass, &created);
+
+    { std::lock_guard<dxvk::mutex> lock(m_mutex);
+
+      for (size_t i = 0; i < m_queued.size(); i++) {
+        if (m_queued[i].isCompatible(state, renderPass)) {
+          m_queued[i] = m_queued.back();
+          m_queued.pop_back();
+          break;
+        }
+      }
+    }
+
+    if (created)
+      this->writePipelineStateToCache(state, renderPass->format());
   }
 
 

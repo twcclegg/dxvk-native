@@ -4362,7 +4362,7 @@ namespace dxvk {
       : DxvkContextFlag::GpDirtyStencilRef);
     
     // Retrieve and bind actual Vulkan pipeline handle
-    m_gpActivePipeline = m_state.gp.pipeline->getPipelineHandle(m_state.gp.state, m_state.om.framebuffer->getRenderPass());
+    m_gpActivePipeline = m_state.gp.pipeline->getPipelineHandle(m_state.gp.state, m_state.om.framebuffer->getRenderPass(), true);
 
     if (unlikely(!m_gpActivePipeline))
       return false;

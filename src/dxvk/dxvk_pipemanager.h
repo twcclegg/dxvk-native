@@ -2,6 +2,7 @@
 #pragma once
 
 #include <mutex>
+#include <queue>
 #include <unordered_map>
 
 #include "dxvk_compute.h"
@@ -94,8 +95,37 @@ namespace dxvk {
      * \brief Stops async compiler threads
      */
     void stopWorkerThreads() const;
+
+    /**
+     * \brief Whether draw-time pipeline misses compile in the background
+     *
+     * Opt-in with DXVK_ASYNC=1. A draw whose pipeline isn't ready is
+     * skipped until a worker has compiled it, instead of stalling
+     * the render thread for the length of the compile.
+     */
+    bool asyncEnabled() const { return m_async; }
+
+    void compileAsync(
+            DxvkGraphicsPipeline*          pipeline,
+      const DxvkGraphicsPipelineStateInfo& state,
+      const DxvkRenderPass*                renderPass);
     
   private:
+
+    struct AsyncItem {
+      DxvkGraphicsPipeline*         pipeline;
+      DxvkGraphicsPipelineStateInfo state;
+      const DxvkRenderPass*         renderPass;
+    };
+
+    bool                              m_async = false;
+    mutable dxvk::mutex               m_asyncMutex;
+    mutable dxvk::condition_variable  m_asyncCond;
+    mutable std::queue<AsyncItem>     m_asyncQueue;
+    mutable std::vector<dxvk::thread> m_asyncThreads;
+    mutable bool                      m_asyncStop = false;
+
+    void asyncWorker();
     
     const DxvkDevice*         m_device;
     Rc<DxvkPipelineCache>     m_cache;
