@@ -2,6 +2,10 @@
 #include "dxvk_instance.h"
 
 namespace dxvk {
+
+  bool g_dxvkDepthClamp = true;
+  bool g_dxvkUbyte4AsUint = false;
+
   
   DxvkDevice::DxvkDevice(
     const Rc<DxvkInstance>&         instance,
@@ -19,6 +23,20 @@ namespace dxvk {
     m_perfHints         (getPerfHints()),
     m_objects           (this),
     m_submissionQueue   (this) {
+    g_dxvkDepthClamp = features.core.features.depthClamp;
+    {
+      VkFormatProperties fp = adapter->formatProperties(VK_FORMAT_R8G8B8A8_USCALED);
+      const char* force = std::getenv("LB_NOSCALED");
+      g_dxvkUbyte4AsUint = !(fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)
+                        || (force && *force == '1');
+#ifdef __ANDROID__
+      // Mobile drivers are unreliable with scaled formats; the UINT path is exact everywhere.
+      g_dxvkUbyte4AsUint = true;
+#endif
+      Logger::info(str::format("Port: USCALED vertex fetch ",
+        (fp.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) ? "supported" : "NOT supported",
+        g_dxvkUbyte4AsUint ? ", UBYTE4/SHORT fetched normalized + rescaled" : ""));
+    }
     auto queueFamilies = m_adapter->findQueueFamilies();
     m_queues.graphics = getQueue(queueFamilies.graphics, 0);
     m_queues.transfer = getQueue(queueFamilies.transfer, 0);

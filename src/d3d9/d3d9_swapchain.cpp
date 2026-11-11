@@ -628,10 +628,8 @@ namespace dxvk {
       if (changeFullscreen)
         this->LeaveFullscreenMode();
 
-      wsi::resizeWindow(
-        m_window, &m_windowState,
-        pPresentParams->BackBufferWidth,
-        pPresentParams->BackBufferHeight);
+      // Port: the platform layer owns the (fullscreen) window; a smaller back
+      // buffer is scaled up to it on present (resolution scale), not resized.
     }
     else {
       if (changeFullscreen) {
@@ -894,7 +892,9 @@ namespace dxvk {
     // Recreate swap chain if the previous present call failed
     VkResult status = m_device->waitForSubmission(&m_presentStatus);
 
-    if (status != VK_SUCCESS)
+    // Port: Android reports SUBOPTIMAL for every present on a rotated display
+    // (the compositor applies the rotation); the swap chain is still usable.
+    if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)
       RecreateSwapChain(m_vsync);
   }
 

@@ -2,6 +2,12 @@
 #include <vector>
 #include <utility>
 
+#if defined(__APPLE__)
+#include <array>
+#include <atomic>
+#include <TargetConditionals.h>
+
+#endif
 #include "dxvk_device.h"
 #include "dxvk_context.h"
 #include "dxvk_main.h"
@@ -1554,6 +1560,13 @@ namespace dxvk {
           uint32_t firstIndex,
           uint32_t vertexOffset,
           uint32_t firstInstance) {
+#if defined(__APPLE__)
+    if (unlikely(vertexOffset != 0) && dxvkFoldsBaseVertex()) {
+      this->drawIndexedFolded(indexCount, instanceCount,
+        firstIndex, int32_t(vertexOffset), firstInstance);
+      return;
+    }
+#endif
     if (this->commitGraphicsState<true, false>()) {
       m_cmd->cmdDrawIndexed(
         indexCount, instanceCount,
@@ -1565,6 +1578,103 @@ namespace dxvk {
   }
   
   
+#if defined(__APPLE__)
+  bool dxvkFoldsBaseVertex() {
+    static const bool s_fold = [] {
+#if TARGET_OS_SIMULATOR
+      const bool fold = true;
+#else
+      const bool fold = env::getEnvVar("DXVK_FORCE_BASE_VERTEX_FOLD") == "1";
+#endif
+      if (fold)
+        Logger::info("DXVK: Folding base vertex into vertex buffer bindings");
+      return fold;
+    }();
+
+    return s_fold;
+  }
+
+
+  void DxvkContext::drawIndexedFolded(
+          uint32_t indexCount,
+          uint32_t instanceCount,
+          uint32_t firstIndex,
+          int32_t  baseVertex,
+          uint32_t firstInstance) {
+    // The iOS Simulator's Metal device cannot draw with a non-zero base
+    // vertex: MoltenVK rejects the draw and fails the whole submission.
+    // vertexOffset only shifts per-vertex fetches, reading vertex i of a
+    // binding at offset + (i + base) * stride, so move that shift into each
+    // per-vertex binding and draw with vertexOffset 0. Slice ends stay put,
+    // which keeps the robustness bound of every valid fetch unchanged.
+    // Instance-rate, stride-0 and unbound bindings are unaffected, and D3D9
+    // shaders never read VertexIndex, so the changed vertex ID is not
+    // observable. A negative base that would move a binding before the
+    // start of its buffer cannot be folded; the D3D9 frontend rebases the
+    // indices of such draws on the CPU instead, so none should get here.
+    std::array<DxvkBufferSlice, MaxNumVertexBindings> saved;
+    uint32_t moved = 0;
+    bool foldable = true;
+
+    for (uint32_t i = 0; i < m_state.gp.state.il.bindingCount(); i++) {
+      const DxvkIlBinding& il = m_state.gp.state.ilBindings[i];
+      const uint32_t binding = il.binding();
+      const DxvkBufferSlice& slice = m_state.vi.vertexBuffers[binding];
+      const int64_t delta = int64_t(baseVertex) * int64_t(m_state.vi.vertexStrides[binding]);
+
+      if (il.inputRate() != VK_VERTEX_INPUT_RATE_VERTEX || !slice.defined() || !delta)
+        continue;
+
+      const int64_t offset = int64_t(slice.offset()) + delta;
+      const int64_t length = int64_t(slice.length()) - delta;
+
+      if (offset < 0) {
+        foldable = false;
+        break;
+      }
+
+      saved[binding] = slice;
+      moved |= 1u << binding;
+
+      // Folding past the end means every fetch from this binding is out of
+      // range. Leave it unbound so that it reads zero, as a robust native
+      // draw may, rather than binding an offset beyond the buffer.
+      m_state.vi.vertexBuffers[binding] = length > 0
+        ? DxvkBufferSlice(slice.buffer(), VkDeviceSize(offset), VkDeviceSize(length))
+        : DxvkBufferSlice();
+    }
+
+    if (likely(foldable)) {
+      m_flags.set(DxvkContextFlag::GpDirtyVertexBuffers);
+
+      if (this->commitGraphicsState<true, false>()) {
+        m_cmd->cmdDrawIndexed(
+          indexCount, instanceCount,
+          firstIndex, 0, firstInstance);
+      }
+
+      m_cmd->addStatCtr(DxvkStatCounter::CmdDrawCalls, 1);
+    } else {
+      // Never record the unsupported draw: it would fail the submission.
+      static std::atomic<bool> s_errorShown = { false };
+
+      if (!s_errorShown.exchange(true)) {
+        Logger::err(str::format("DxvkContext: Base vertex ", baseVertex,
+          " precedes a vertex buffer start, skipping draw"));
+      }
+    }
+
+    for (uint32_t binding = 0; binding < MaxNumVertexBindings; binding++) {
+      if (moved & (1u << binding))
+        m_state.vi.vertexBuffers[binding] = saved[binding];
+    }
+
+    // Rebind the original slices for whatever draws next
+    m_flags.set(DxvkContextFlag::GpDirtyVertexBuffers);
+  }
+
+
+#endif
   void DxvkContext::drawIndexedIndirect(
           VkDeviceSize      offset,
           uint32_t          count,

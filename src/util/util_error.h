@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <cstdio>
 
 namespace dxvk {
   
@@ -16,7 +17,11 @@ namespace dxvk {
     
     DxvkError() { }
     DxvkError(std::string&& message)
-    : m_message(std::move(message)) { }
+    : m_message(std::move(message)) {
+      // Port: errors that escape to std::terminate would otherwise go unlogged.
+      std::fprintf(stderr, "DxvkError: %s\n", m_message.c_str());
+      std::fflush(stderr);
+    }
     
     const std::string& message() const {
       return m_message;

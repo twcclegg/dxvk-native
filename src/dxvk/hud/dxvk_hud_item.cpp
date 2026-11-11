@@ -602,4 +602,37 @@ namespace dxvk::hud {
     return position;
   }
 
+
+  static dxvk::mutex                              g_portStatusMutex;
+  static std::string                              g_portStatus;
+  static dxvk::high_resolution_clock::time_point  g_portStatusTime;
+
+
+  void HudPortStatusItem::update(dxvk::high_resolution_clock::time_point time) {
+    std::lock_guard<dxvk::mutex> lock(g_portStatusMutex);
+    auto age = std::chrono::duration_cast<std::chrono::milliseconds>(time - g_portStatusTime);
+    m_text = age.count() <= 2000 ? g_portStatus : std::string();
+  }
+
+
+  HudPos HudPortStatusItem::render(
+          HudRenderer&      renderer,
+          HudPos            position) {
+    if (!m_text.empty()) {
+      renderer.drawText(16.0f,
+        { 8.0f, renderer.surfaceSize().height / renderer.scale() - 12.0f },
+        { 1.0f, 1.0f, 1.0f, 1.0f },
+        m_text);
+    }
+
+    return position;
+  }
+
+}
+
+
+extern "C" __attribute__((visibility("default"))) void dxvk_port_status(const char* text) {
+  std::lock_guard<dxvk::mutex> lock(dxvk::hud::g_portStatusMutex);
+  dxvk::hud::g_portStatus = text ? text : "";
+  dxvk::hud::g_portStatusTime = dxvk::high_resolution_clock::now();
 }

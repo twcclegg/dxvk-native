@@ -414,4 +414,26 @@ namespace dxvk::hud {
 
   };
 
+
+  /**
+   * \brief Port status line (LEGO Marvel Android port)
+   *
+   * Shows the text last passed to dxvk_port_status() for two seconds,
+   * e.g. which shader the game is compiling while the screen is black.
+   */
+  class HudPortStatusItem : public HudItem {
+  public:
+
+    void update(dxvk::high_resolution_clock::time_point time);
+
+    HudPos render(
+            HudRenderer&      renderer,
+            HudPos            position);
+
+  private:
+
+    std::string m_text;
+
+  };
+
 }

@@ -5,6 +5,10 @@
 
 #include <algorithm>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 namespace dxvk {
 
   D3D9CommonTexture::D3D9CommonTexture(
@@ -336,15 +340,34 @@ namespace dxvk {
       pImageInfo->format, pImageInfo->type, Tiling,
       pImageInfo->usage, pImageInfo->flags, formatProps);
     
-    if (status != VK_SUCCESS)
-      return FALSE;
-    
-    return (pImageInfo->extent.width  <= formatProps.maxExtent.width)
+    BOOL supported = status == VK_SUCCESS
+        && (pImageInfo->extent.width  <= formatProps.maxExtent.width)
         && (pImageInfo->extent.height <= formatProps.maxExtent.height)
         && (pImageInfo->extent.depth  <= formatProps.maxExtent.depth)
         && (pImageInfo->numLayers     <= formatProps.maxArrayLayers)
         && (pImageInfo->mipLevels     <= formatProps.maxMipLevels)
         && (pImageInfo->sampleCount    & formatProps.sampleCounts);
+
+#if defined(__APPLE__) && TARGET_OS_SIMULATOR
+    // The Simulator has no layered rendering, so MoltenVK caps attachment
+    // images at maxFramebufferLayers = 1 in this query. D3D9 only renders to
+    // one cube face or slice at a time through single-layer views, which
+    // Metal supports, and sampling views carry SAMPLED-only view usage. So a
+    // multi-layer attachment image is usable when its format/usage works as
+    // a single 2D layer and its full shape works without attachment usage.
+    const VkImageUsageFlags attachment = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                       | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (!supported && pImageInfo->numLayers > 1 && (pImageInfo->usage & attachment)) {
+      DxvkImageCreateInfo layer = *pImageInfo;
+      layer.numLayers = 1;
+      layer.flags &= ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT);
+      DxvkImageCreateInfo shape = *pImageInfo;
+      shape.usage &= ~attachment;
+      supported = CheckImageSupport(&layer, Tiling) && CheckImageSupport(&shape, Tiling);
+    }
+#endif
+
+    return supported;
   }
 
 

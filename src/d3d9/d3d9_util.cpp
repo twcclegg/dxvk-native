@@ -268,9 +268,11 @@ namespace dxvk {
       case D3DDECLTYPE_FLOAT3:    return VK_FORMAT_R32G32B32_SFLOAT;
       case D3DDECLTYPE_FLOAT4:    return VK_FORMAT_R32G32B32A32_SFLOAT;
       case D3DDECLTYPE_D3DCOLOR:  return VK_FORMAT_B8G8R8A8_UNORM;
-      case D3DDECLTYPE_UBYTE4:    return VK_FORMAT_R8G8B8A8_USCALED;
-      case D3DDECLTYPE_SHORT2:    return VK_FORMAT_R16G16_SSCALED;
-      case D3DDECLTYPE_SHORT4:    return VK_FORMAT_R16G16B16A16_SSCALED;
+      // Port: without SCALED vertex formats these are fetched normalized and
+      // the vertex shader multiplies them back (D3D9SpecConstantId::VertexScaleMask).
+      case D3DDECLTYPE_UBYTE4:    return g_dxvkUbyte4AsUint ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_USCALED;
+      case D3DDECLTYPE_SHORT2:    return g_dxvkUbyte4AsUint ? VK_FORMAT_R16G16_SNORM : VK_FORMAT_R16G16_SSCALED;
+      case D3DDECLTYPE_SHORT4:    return g_dxvkUbyte4AsUint ? VK_FORMAT_R16G16B16A16_SNORM : VK_FORMAT_R16G16B16A16_SSCALED;
       case D3DDECLTYPE_UBYTE4N:   return VK_FORMAT_R8G8B8A8_UNORM;
       case D3DDECLTYPE_SHORT2N:   return VK_FORMAT_R16G16_SNORM;
       case D3DDECLTYPE_SHORT4N:   return VK_FORMAT_R16G16B16A16_SNORM;

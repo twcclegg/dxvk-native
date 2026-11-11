@@ -19,6 +19,16 @@ namespace dxvk {
     Fetch4            = 9,
 
     SamplerDepthMode  = 10,
+
+    // Port: per vertex-shader input, bit n = x255 (UBYTE4 fetched as UNORM),
+    // bit 16+n = x32767 (SHORT2/4 fetched as SNORM), for GPUs without SCALED vertex formats.
+    VertexScaleMask   = 11,
+
+#ifdef __APPLE__
+    // Port: bit n = pixel shader sampler n has a depth (shadow) texture with a
+    // LINEAR min or mag filter, so the emulated compare applies 2x2 PCF.
+    SamplerDepthFilter = 12,
+#endif
   };
 
 }

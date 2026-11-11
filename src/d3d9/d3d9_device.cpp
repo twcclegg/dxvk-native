@@ -2412,6 +2412,16 @@ namespace dxvk {
 
     PrepareDraw(PrimitiveType);
 
+#if defined(__APPLE__)
+    // Without base vertex support the context folds the base vertex into
+    // the stream offsets. That cannot express a negative base which moves
+    // a stream before its buffer start, so rebase those indices instead.
+    if (unlikely(BaseVertexIndex < 0) && dxvkFoldsBaseVertex()
+     && !CanFoldBaseVertex(BaseVertexIndex)
+     && DrawIndexedRebased(PrimitiveType, BaseVertexIndex, StartIndex, PrimitiveCount))
+      return D3D_OK;
+
+#endif
     EmitCs([this,
       cPrimType        = PrimitiveType,
       cPrimCount       = PrimitiveCount,
@@ -3836,7 +3846,7 @@ namespace dxvk {
     DxvkDeviceFeatures enabled = {};
 
     // Geometry shaders are used for some meta ops
-    enabled.core.features.geometryShader = VK_TRUE;
+    enabled.core.features.geometryShader = supported.core.features.geometryShader;
     enabled.core.features.robustBufferAccess = VK_TRUE;
     enabled.extRobustness2.robustBufferAccess2 = supported.extRobustness2.robustBufferAccess2;
 
@@ -3854,34 +3864,34 @@ namespace dxvk {
     enabled.core.features.vertexPipelineStoresAndAtomics = supported.core.features.vertexPipelineStoresAndAtomics;
 
     // DXVK Meta
-    enabled.core.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-    enabled.core.features.imageCubeArray = VK_TRUE;
+    enabled.core.features.shaderStorageImageWriteWithoutFormat = supported.core.features.shaderStorageImageWriteWithoutFormat;
+    enabled.core.features.imageCubeArray = supported.core.features.imageCubeArray;
 
     // SM1 level hardware
-    enabled.core.features.depthClamp = VK_TRUE;
-    enabled.core.features.depthBiasClamp = VK_TRUE;
-    enabled.core.features.fillModeNonSolid = VK_TRUE;
+    enabled.core.features.depthClamp = supported.core.features.depthClamp;
+    enabled.core.features.depthBiasClamp = supported.core.features.depthBiasClamp;
+    enabled.core.features.fillModeNonSolid = supported.core.features.fillModeNonSolid;
     enabled.core.features.pipelineStatisticsQuery = supported.core.features.pipelineStatisticsQuery;
-    enabled.core.features.sampleRateShading = VK_TRUE;
+    enabled.core.features.sampleRateShading = supported.core.features.sampleRateShading;
     enabled.core.features.samplerAnisotropy = supported.core.features.samplerAnisotropy;
-    enabled.core.features.shaderClipDistance = VK_TRUE;
-    enabled.core.features.shaderCullDistance = VK_TRUE;
+    enabled.core.features.shaderClipDistance = supported.core.features.shaderClipDistance;
+    enabled.core.features.shaderCullDistance = supported.core.features.shaderCullDistance;
 
     // Ensure we support real BC formats and unofficial vendor ones.
-    enabled.core.features.textureCompressionBC = VK_TRUE;
+    enabled.core.features.textureCompressionBC = supported.core.features.textureCompressionBC;
 
     enabled.extDepthClipEnable.depthClipEnable = supported.extDepthClipEnable.depthClipEnable;
     enabled.extHostQueryReset.hostQueryReset = supported.extHostQueryReset.hostQueryReset;
 
     // SM2 level hardware
-    enabled.core.features.occlusionQueryPrecise = VK_TRUE;
+    enabled.core.features.occlusionQueryPrecise = supported.core.features.occlusionQueryPrecise;
 
     // SM3 level hardware
-    enabled.core.features.multiViewport = VK_TRUE;
-    enabled.core.features.independentBlend = VK_TRUE;
+    enabled.core.features.multiViewport = supported.core.features.multiViewport;
+    enabled.core.features.independentBlend = supported.core.features.independentBlend;
 
     // D3D10 level hardware supports this in D3D9 native.
-    enabled.core.features.fullDrawIndexUint32 = VK_TRUE;
+    enabled.core.features.fullDrawIndexUint32 = supported.core.features.fullDrawIndexUint32;
 
     // Enable depth bounds test if we support it.
     enabled.core.features.depthBounds = supported.core.features.depthBounds;
@@ -5787,8 +5797,15 @@ namespace dxvk {
       info.addressModeU   = DecodeAddressMode(cKey.AddressU);
       info.addressModeV   = DecodeAddressMode(cKey.AddressV);
       info.addressModeW   = DecodeAddressMode(cKey.AddressW);
+#ifdef __APPLE__
+      // The Metal shader path compares in the shader (dxso_compiler.cpp,
+      // emitDepthCompareEmulated), so depth textures use a plain sampler.
+      info.compareToDepth = VK_FALSE;
+      info.compareOp      = VK_COMPARE_OP_NEVER;
+#else
       info.compareToDepth = cKey.Depth;
       info.compareOp      = cKey.Depth ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_NEVER;
+#endif
       info.magFilter      = DecodeFilter(cKey.MagFilter);
       info.minFilter      = DecodeFilter(cKey.MinFilter);
       info.mipmapMode     = mipFilter.MipFilter;
@@ -5800,6 +5817,22 @@ namespace dxvk {
       info.usePixelCoord  = VK_FALSE;
 
       DecodeD3DCOLOR(cKey.BorderColor, info.borderColor.float32);
+
+#ifdef __APPLE__
+      if (cKey.Depth) {
+        // The emulated compare needs raw texels: a filtered depth compared
+        // against the reference is not PCF. The shader does its own 2x2
+        // PCF when the D3D9 filter is LINEAR (SamplerDepthFilter).
+        info.magFilter     = VK_FILTER_NEAREST;
+        info.minFilter     = VK_FILTER_NEAREST;
+        info.mipmapMode    = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.useAnisotropy = VK_FALSE;
+        // A compare sampler's border depth is its red channel alone
+        // (DxvkSampler::getBorderColor); keep that border selection.
+        for (uint32_t c = 1; c < 4; c++)
+          info.borderColor.float32[c] = info.borderColor.float32[0];
+      }
+#endif
 
       if (!m_dxvkDevice->features().extCustomBorderColor.customBorderColorWithoutFormat) {
         // HACK: Let's get OPAQUE_WHITE border color over
@@ -6063,6 +6096,21 @@ namespace dxvk {
     if (depthTextureMask != m_lastSamplerDepthMode)
       UpdateSamplerDepthModeSpecConstant(depthTextureMask);
 
+#ifdef __APPLE__
+    // Pixel shader samplers with a depth texture and a LINEAR filter get the
+    // emulated hardware PCF; the others a single point compare.
+    uint32_t depthFilterMask = 0;
+    for (uint32_t i : bit::BitMask(depthTextureMask & 0xffffu)) {
+      const auto& samplerState = m_state.samplerStates[i];
+      if (DecodeFilter(D3DTEXTUREFILTERTYPE(samplerState[D3DSAMP_MAGFILTER])) == VK_FILTER_LINEAR
+       || DecodeFilter(D3DTEXTUREFILTERTYPE(samplerState[D3DSAMP_MINFILTER])) == VK_FILTER_LINEAR)
+        depthFilterMask |= 1u << i;
+    }
+
+    if (depthFilterMask != m_lastSamplerDepthFilter)
+      UpdateSamplerDepthFilterSpecConstant(depthFilterMask);
+#endif
+
     if (m_flags.test(D3D9DeviceFlag::DirtySharedPixelShaderData) && config::FixedFunctionEnabled) {
       m_flags.clr(D3D9DeviceFlag::DirtySharedPixelShaderData);
 
@@ -6159,6 +6207,7 @@ namespace dxvk {
 
         uint32_t attrMask = 0;
         uint32_t bindMask = 0;
+        uint32_t scaleMask = 0;
 
         const auto& isgn = cVertexShader != nullptr
           ? GetCommonShader(cVertexShader)->GetIsgn()
@@ -6182,6 +6231,16 @@ namespace dxvk {
               attrib.binding = uint32_t(element.Stream);
               attrib.format  = DecodeDecltype(D3DDECLTYPE(element.Type));
               attrib.offset  = element.Offset;
+              // port: 2 bits per input (1 UBYTE4, 2 SHORT2, 3 SHORT4), read by the VertexScaleMask code in dxso_compiler.cpp
+              if (attrib.format == VK_FORMAT_R8G8B8A8_UNORM && element.Type == D3DDECLTYPE_UBYTE4)
+                scaleMask |= 1u << (2 * i);
+              if (attrib.format == VK_FORMAT_R16G16_SNORM && element.Type == D3DDECLTYPE_SHORT2)
+                scaleMask |= 2u << (2 * i);
+              if (attrib.format == VK_FORMAT_R16G16B16A16_SNORM && element.Type == D3DDECLTYPE_SHORT4)
+                scaleMask |= 3u << (2 * i);
+              { static uint64_t seen = 0; // port: log each vertex format once
+                if (!(seen & (1ull << (element.Type & 63)))) { seen |= 1ull << (element.Type & 63);
+                  Logger::info(str::format("D3D9: vertex decltype ", uint32_t(element.Type), " usage ", uint32_t(element.Usage), " -> ", attrib.format)); } }
 
               cIaState.streamsUsed |= 1u << attrib.binding;
               break;
@@ -6223,6 +6282,7 @@ namespace dxvk {
 
         // Compact the attribute and binding lists to filter
         // out attributes and bindings not used by the shader
+        ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, D3D9SpecConstantId::VertexScaleMask, scaleMask);
         uint32_t attrCount = CompactSparseList(attrList.data(), attrMask);
         uint32_t bindCount = CompactSparseList(bindList.data(), bindMask);
 
@@ -6268,6 +6328,112 @@ namespace dxvk {
   }
 
 
+#if defined(__APPLE__)
+  bool D3D9DeviceEx::CanFoldBaseVertex(INT BaseVertexIndex) const {
+    // Mirrors DxvkContext::drawIndexedFolded over every per-vertex stream
+    // the declaration names (a superset of the bindings the shader reads):
+    // each moves to offset + base * stride, which must not precede the
+    // start of its buffer.
+    if (m_state.vertexDecl == nullptr)
+      return true;
+
+    for (const auto& element : m_state.vertexDecl->GetElements()) {
+      const uint32_t stream = element.Stream;
+
+      if (stream >= caps::MaxStreams
+       || (m_state.streamFreq[stream] & D3DSTREAMSOURCE_INSTANCEDATA)
+       || m_state.vertexBuffers[stream].vertexBuffer == nullptr)
+        continue;
+
+      const D3D9VBO& vbo = m_state.vertexBuffers[stream];
+
+      if (int64_t(vbo.offset) + int64_t(BaseVertexIndex) * int64_t(vbo.stride) < 0)
+        return false;
+    }
+
+    return true;
+  }
+
+
+  bool D3D9DeviceEx::DrawIndexedRebased(
+          D3DPRIMITIVETYPE PrimitiveType,
+          INT              BaseVertexIndex,
+          UINT             StartIndex,
+          UINT             PrimitiveCount) {
+    // Draw index + base with a zero base vertex against the unchanged
+    // streams. D3D9 index data only ever comes from the CPU, and the mapped
+    // slice holds what this draw reads, which is also what DrawIndexedPrimitiveUP
+    // relies on when it copies indices at call time.
+    D3D9CommonBuffer* ibo = GetCommonBuffer(m_state.indices);
+
+    if (unlikely(ibo == nullptr))
+      return false;
+
+    const uint8_t* src = reinterpret_cast<const uint8_t*>(ibo->GetMappedSlice().mapPtr);
+
+    if (unlikely(src == nullptr))
+      return false;
+
+    const bool     index16    = ibo->Desc()->Format == D3D9Format::INDEX16;
+    const uint32_t indexSize  = index16 ? 2u : 4u;
+    const uint64_t available  = ibo->Desc()->Size / indexSize;
+    const uint32_t indexCount = GetVertexCount(PrimitiveType, PrimitiveCount);
+
+    D3D9BufferSlice upSlice = AllocTempBuffer<true>(
+      std::max(indexCount, 1u) * sizeof(uint32_t));
+    uint32_t* dst = reinterpret_cast<uint32_t*>(upSlice.mapPtr);
+
+    for (uint32_t i = 0; i < indexCount; i++) {
+      const uint64_t at = uint64_t(StartIndex) + i;
+      uint32_t index = 0;
+
+      // Never read past the buffer; a robust index fetch may yield 0 there.
+      if (likely(at < available)) {
+        if (index16) {
+          uint16_t value;
+          std::memcpy(&value, src + at * 2u, sizeof(value));
+          index = value;
+        } else {
+          std::memcpy(&index, src + at * 4u, sizeof(index));
+        }
+      }
+
+      // The same 32-bit sum Vulkan forms from index and vertexOffset. Kept
+      // 32-bit so that index 0xFFFF of a 16-bit buffer stays an index.
+      dst[i] = index + uint32_t(BaseVertexIndex);
+    }
+
+    EmitCs([this,
+      cIndexSlice    = std::move(upSlice.slice),
+      cRestoreSlice  = ibo->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_REAL>(),
+      cRestoreType   = DecodeIndexType(ibo->Desc()->Format),
+      cPrimType      = PrimitiveType,
+      cPrimCount     = PrimitiveCount,
+      cInstanceCount = GetInstanceCount()
+    ](DxvkContext* ctx) {
+      auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
+
+      ApplyPrimitiveType(ctx, cPrimType);
+
+      ctx->bindIndexBuffer(cIndexSlice, VK_INDEX_TYPE_UINT32);
+      ctx->drawIndexed(
+        drawInfo.vertexCount, drawInfo.instanceCount,
+        0, 0, 0);
+      ctx->bindIndexBuffer(cRestoreSlice, cRestoreType);
+    });
+
+    static bool s_rebaseShown = false;
+
+    if (!std::exchange(s_rebaseShown, true)) {
+      Logger::info(str::format("D3D9DeviceEx::DrawIndexedPrimitive: Rebasing indices for base vertex ",
+        BaseVertexIndex, " (stream offset too small to fold)"));
+    }
+
+    return true;
+  }
+
+
+#endif
   void D3D9DeviceEx::Begin(D3D9Query* pQuery) {
     D3D9DeviceLock lock = LockDevice();
 
@@ -6769,6 +6935,17 @@ namespace dxvk {
   }
 
 
+#ifdef __APPLE__
+  void D3D9DeviceEx::UpdateSamplerDepthFilterSpecConstant(uint32_t value) {
+    EmitCs([cBitfield = value](DxvkContext* ctx) {
+      ctx->setSpecConstant(VK_PIPELINE_BIND_POINT_GRAPHICS, D3D9SpecConstantId::SamplerDepthFilter, cBitfield);
+    });
+
+    m_lastSamplerDepthFilter = value;
+  }
+#endif
+
+
   void D3D9DeviceEx::ApplyPrimitiveType(
     DxvkContext*      pContext,
     D3DPRIMITIVETYPE  PrimType) {
@@ -7135,6 +7312,9 @@ namespace dxvk {
     UpdateBoolSpecConstantVertex(0u);
     UpdateBoolSpecConstantPixel(0u);
     UpdateSamplerDepthModeSpecConstant(0u);
+#ifdef __APPLE__
+    UpdateSamplerDepthFilterSpecConstant(0u);
+#endif
 
     return D3D_OK;
   }

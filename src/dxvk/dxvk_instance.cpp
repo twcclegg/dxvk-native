@@ -119,6 +119,13 @@ namespace dxvk {
     for (const auto& provider : m_extProviders)
       extensionsEnabled.merge(provider->getInstanceExtensions());
 
+#ifdef __APPLE__
+    // MoltenVK devices implement the Vulkan portability subset and must be
+    // opted into explicitly when enumeration is provided by a Vulkan loader.
+    const bool enumeratePortability = extensionsAvailable.supports("VK_KHR_portability_enumeration") != 0;
+    if (enumeratePortability)
+      extensionsEnabled.add("VK_KHR_portability_enumeration");
+#endif
     DxvkNameList extensionNameList = extensionsEnabled.toNameList();
     
     Logger::info("Enabled instance extensions:");
@@ -139,6 +146,10 @@ namespace dxvk {
     info.sType                    = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     info.pNext                    = nullptr;
     info.flags                    = 0;
+#ifdef __APPLE__
+    if (enumeratePortability)
+      info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     info.pApplicationInfo         = &appInfo;
     info.enabledLayerCount        = 0;
     info.ppEnabledLayerNames      = nullptr;

@@ -26,6 +26,12 @@
 #include "../vulkan/vulkan_presenter.h"
 
 namespace dxvk {
+
+  /** Whether depth clamping may be enabled in pipelines (not on all mobile GPUs). */
+  extern bool g_dxvkDepthClamp;
+  /** Port: UBYTE4 vertex data is fetched as R8G8B8A8_UINT (no USCALED vertex support). */
+  extern bool g_dxvkUbyte4AsUint;
+
   
   class DxvkInstance;
 

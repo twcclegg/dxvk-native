@@ -522,7 +522,7 @@ namespace dxvk {
     rsState.sType               = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rsState.pNext               = nullptr;
     rsState.flags               = 0;
-    rsState.depthClampEnable    = VK_TRUE;
+    rsState.depthClampEnable    = g_dxvkDepthClamp;
     rsState.rasterizerDiscardEnable = VK_FALSE;
     rsState.polygonMode         = VK_POLYGON_MODE_FILL;
     rsState.cullMode            = VK_CULL_MODE_NONE;

@@ -159,6 +159,9 @@ namespace dxvk {
     uint32_t samplerTypeSpec    = 0;
     uint32_t projectionSpec     = 0;
     uint32_t fetch4Spec         = 0;
+#ifdef __APPLE__
+    uint32_t depthFilterSpec    = 0;
+#endif
 
     //////////////
     // Misc Types
@@ -270,6 +273,7 @@ namespace dxvk {
 
     uint32_t                   m_boolSpecConstant;
     uint32_t                   m_depthSpecConstant;
+    uint32_t                   m_vtxScaleSpecConstant = 0;
 
     ///////////////////////////////////////////////////////
     // Resource slot description for the shader. This will
@@ -647,7 +651,22 @@ namespace dxvk {
             DxsoRegisterValue       coordinates,
             uint32_t                reference,
             uint32_t                fetch4,
+      const SpirvImageOperands&     operands
+#ifdef __APPLE__
+    ,       uint32_t                depthFilterLinear = 0
+#endif
+      );
+
+#ifdef __APPLE__
+    uint32_t emitDepthCompareEmulated(
+            bool                    projected,
+            uint32_t                resultType,
+            DxsoSamplerInfo&        samplerInfo,
+            DxsoRegisterValue       coordinates,
+            uint32_t                reference,
+            uint32_t                filterLinear,
       const SpirvImageOperands&     operands);
+#endif
 
     ///////////////////////////////
     // Shader finalization methods

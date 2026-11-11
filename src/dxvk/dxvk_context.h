@@ -11,6 +11,18 @@
 
 namespace dxvk {
   
+#if defined(__APPLE__)
+  /**
+   * \brief Whether indexed draws must not use a non-zero vertexOffset
+   *
+   * Always true on the iOS Simulator, whose Metal device cannot draw
+   * with a base vertex. Elsewhere on Apple it is true only when
+   * DXVK_FORCE_BASE_VERTEX_FOLD=1, so that the emulation can be
+   * compared with native base vertex draws. Read once.
+   */
+  bool dxvkFoldsBaseVertex();
+
+#endif
   /**
    * \brief DXVk context
    * 
@@ -1294,6 +1306,15 @@ namespace dxvk {
     bool updateIndexBufferBinding();
     void updateVertexBufferBindings();
 
+#if defined(__APPLE__)
+    void drawIndexedFolded(
+            uint32_t                indexCount,
+            uint32_t                instanceCount,
+            uint32_t                firstIndex,
+            int32_t                 baseVertex,
+            uint32_t                firstInstance);
+
+#endif
     void updateTransformFeedbackBuffers();
     void updateTransformFeedbackState();
 

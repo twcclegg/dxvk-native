@@ -368,6 +368,12 @@ namespace dxvk {
     m_depthSpecConstant = m_module.specConst32(m_module.defIntType(32, 0), 0);
     m_module.decorateSpecId(m_depthSpecConstant, getSpecId(D3D9SpecConstantId::SamplerDepthMode));
     m_module.setDebugName(m_depthSpecConstant, "depthSamplers");
+
+    if (m_programInfo.type() == DxsoProgramType::VertexShader) {
+      m_vtxScaleSpecConstant = m_module.specConst32(m_module.defIntType(32, 0), 0);
+      m_module.decorateSpecId(m_vtxScaleSpecConstant, getSpecId(D3D9SpecConstantId::VertexScaleMask));
+      m_module.setDebugName(m_vtxScaleSpecConstant, "vertexScaleMask");
+    }
   }
 
 
@@ -479,6 +485,12 @@ namespace dxvk {
     m_ps.fetch4Spec = m_module.specConst32(m_module.defIntType(32, 0), 0);
     m_module.decorateSpecId(m_ps.fetch4Spec, getSpecId(D3D9SpecConstantId::Fetch4));
     m_module.setDebugName(m_ps.fetch4Spec, "s_fetch4");
+
+#ifdef __APPLE__
+    m_ps.depthFilterSpec = m_module.specConst32(m_module.defIntType(32, 0), 0);
+    m_module.decorateSpecId(m_ps.depthFilterSpec, getSpecId(D3D9SpecConstantId::SamplerDepthFilter));
+    m_module.setDebugName(m_ps.depthFilterSpec, "s_depth_filter");
+#endif
 
     this->setupRenderStateInfo();
     this->emitPsSharedConstants();
@@ -760,10 +772,12 @@ namespace dxvk {
 
       DclSampler(idx, binding, samplerType, false, implicit);
 
+#ifndef __APPLE__
       if (samplerType != SamplerTypeTexture3D) {
         // We could also be depth compared!
         DclSampler(idx, binding, samplerType, true, implicit);
       }
+#endif
     }
     else {
       // Could be any of these!
@@ -773,8 +787,10 @@ namespace dxvk {
 
         DclSampler(idx, binding, samplerType, false, implicit);
 
+#ifndef __APPLE__
         if (samplerType != SamplerTypeTexture3D)
           DclSampler(idx, binding, samplerType, true, implicit);
+#endif
       }
     }
 
@@ -2793,6 +2809,19 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         fetch4 = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
       }
 
+#ifdef __APPLE__
+      // D3D9 filter of a 2D depth texture in a pixel shader: POINT compares
+      // one texel, LINEAR is hardware PCF (emitDepthCompareEmulated).
+      uint32_t depthFilterLinear = 0;
+      if (depth && samplerType == SamplerTypeTexture2D
+       && m_programInfo.type() == DxsoProgramType::PixelShader) {
+        depthFilterLinear = m_module.opBitFieldUExtract(
+          m_module.defIntType(32, 0), m_ps.depthFilterSpec,
+          m_module.consti32(samplerIdx), m_module.consti32(1));
+        depthFilterLinear = m_module.opIEqual(m_module.defBoolType(), depthFilterLinear, m_module.constu32(1));
+      }
+#endif
+
       result.id = this->emitSample(
         projDivider != 0,
         typeId,
@@ -2800,7 +2829,11 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         texcoordVar,
         reference,
         fetch4,
-        imageOperands);
+        imageOperands
+#ifdef __APPLE__
+      , depthFilterLinear
+#endif
+        );
 
       if (switchProjResult) {
         uint32_t bool_t = m_module.defBoolType();
@@ -2812,7 +2845,11 @@ void DxsoCompiler::emitControlFlowGenericLoop(
           texcoordVar,
           reference,
           fetch4,
-          imageOperands);
+          imageOperands
+#ifdef __APPLE__
+        , depthFilterLinear
+#endif
+          );
 
         uint32_t shouldProj = m_module.opBitFieldUExtract(
           m_module.defIntType(32, 0), m_ps.projectionSpec,
@@ -2893,7 +2930,13 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
         m_module.opLabel(depthLabel);
         // No spec constant as if we are unbound we always fall down the color path.
+#ifdef __APPLE__
+        // MoltenVK: the colour variable is the only one declared; emitSample
+        // performs the depth comparison in the shader.
+        SampleImage(texcoordVar, sampler.color[samplerType], true, samplerType, 0);
+#else
         SampleImage(texcoordVar, sampler.depth[samplerType], true, samplerType, 0);
+#endif
         m_module.opBranch(endLabel);
 
         m_module.opLabel(endLabel);
@@ -3089,8 +3132,20 @@ void DxsoCompiler::emitControlFlowGenericLoop(
           DxsoRegisterValue       coordinates,
           uint32_t                reference,
           uint32_t                fetch4,
-    const SpirvImageOperands&     operands) {
+    const SpirvImageOperands&     operands
+#ifdef __APPLE__
+  ,       uint32_t                depthFilterLinear
+#endif
+    ) {
     const bool depthCompare = reference != 0;
+
+#ifdef __APPLE__
+    if (depthCompare) {
+      return emitDepthCompareEmulated(projected, resultType, samplerInfo,
+        coordinates, reference, depthFilterLinear, operands);
+    }
+#endif
+
     const bool explicitLod  =
        (operands.flags & spv::ImageOperandsLodMask)
     || (operands.flags & spv::ImageOperandsGradMask);
@@ -3179,6 +3234,122 @@ void DxsoCompiler::emitControlFlowGenericLoop(
   }
 
 
+#ifdef __APPLE__
+  uint32_t DxsoCompiler::emitDepthCompareEmulated(
+          bool                    projected,
+          uint32_t                resultType,
+          DxsoSamplerInfo&        samplerInfo,
+          DxsoRegisterValue       coordinates,
+          uint32_t                reference,
+          uint32_t                filterLinear,
+    const SpirvImageOperands&     operands) {
+    // MoltenVK cannot alias a depth2d on the colour texture's binding, and a
+    // Dref sample would make SPIRV-Cross declare the colour image a depth2d,
+    // so the D3D9 hardware shadow compare is done here on the colour image:
+    // 1.0 where ref <= depth (VK_COMPARE_OP_LESS_OR_EQUAL), else 0.0, with
+    // ref = coord[dimensions] (divided by q when projected, as for
+    // OpImageSampleProjDref*). On Apple the sampler of a depth texture is
+    // NEAREST without anisotropy (d3d9_device.cpp), so every fetch returns
+    // one unfiltered texel and a LINEAR D3D9 filter is applied below as PCF:
+    // bilinear weighting of four comparisons, never comparing a filtered depth.
+    const bool explicitLod =
+       (operands.flags & spv::ImageOperandsLodMask)
+    || (operands.flags & spv::ImageOperandsGradMask);
+
+    const uint32_t floatType = m_module.defFloatType(32);
+    const uint32_t vec2Type  = m_module.defVectorType(floatType, 2);
+    const uint32_t vec4Type  = m_module.defVectorType(floatType, 4);
+    const uint32_t boolType  = m_module.defBoolType();
+
+    const uint32_t sampledImage = m_module.opLoad(samplerInfo.typeId, samplerInfo.varId);
+
+    uint32_t ref = reference;
+    uint32_t q   = 0;
+    uint32_t texel;
+
+    if (projected) {
+      uint32_t qIndex = samplerInfo.dimensions;
+      q   = m_module.opCompositeExtract(floatType, coordinates.id, 1, &qIndex);
+      ref = m_module.opFDiv(floatType, ref, q);
+      texel = explicitLod
+        ? m_module.opImageSampleProjExplicitLod(vec4Type, sampledImage, coordinates.id, operands)
+        : m_module.opImageSampleProjImplicitLod(vec4Type, sampledImage, coordinates.id, operands);
+    }
+    else {
+      texel = explicitLod
+        ? m_module.opImageSampleExplicitLod(vec4Type, sampledImage, coordinates.id, operands)
+        : m_module.opImageSampleImplicitLod(vec4Type, sampledImage, coordinates.id, operands);
+    }
+
+    // D3D9 shadow formats are fixed point, whose compare clamps the reference
+    // to [0, 1]; D24 formats are backed by D32_SFLOAT here, so clamp explicitly.
+    ref = m_module.opFClamp(floatType, ref,
+      m_module.constf32(0.0f), m_module.constf32(1.0f));
+
+    auto Compare = [&](uint32_t sample) {
+      uint32_t x = 0;
+      uint32_t depth = m_module.opCompositeExtract(floatType, sample, 1, &x);
+      uint32_t pass  = m_module.opFOrdLessThanEqual(boolType, ref, depth);
+      return m_module.opSelect(resultType, pass,
+        m_module.constf32(1.0f), m_module.constf32(0.0f));
+    };
+
+    const uint32_t point = Compare(texel);
+
+    if (!filterLinear)
+      return point;
+
+    // PCF over the 2x2 footprint a LINEAR filter would use (2D only). Each tap
+    // samples an exact texel centre, so texel selection cannot disagree with
+    // the weights, and the sampler's address mode and border still apply.
+    const std::array<uint32_t, 2> xy = { 0, 1 };
+    uint32_t uv = m_module.opVectorShuffle(vec2Type,
+      coordinates.id, coordinates.id, xy.size(), xy.data());
+
+    if (projected) {
+      uv = m_module.opVectorTimesScalar(vec2Type, uv,
+        m_module.opFDiv(floatType, m_module.constf32(1.0f), q));
+    }
+
+    // Shadow maps have a single level; the taps use level 0.
+    const uint32_t ivec2Type = m_module.defVectorType(m_module.defIntType(32, 1), 2);
+    const uint32_t image = m_module.opImage(samplerInfo.imageTypeId, sampledImage);
+    uint32_t size = m_module.opImageQuerySizeLod(ivec2Type, image, m_module.consti32(0));
+    size = m_module.opConvertStoF(vec2Type, size);
+
+    const uint32_t t    = m_module.opFSub(vec2Type,
+      m_module.opFMul(vec2Type, uv, size), m_module.constvec2f32(0.5f, 0.5f));
+    const uint32_t base = m_module.opFloor(vec2Type, t);
+    const uint32_t frac = m_module.opFract(vec2Type, t);
+
+    SpirvImageOperands lod0;
+    lod0.flags = spv::ImageOperandsLodMask;
+    lod0.sLod  = m_module.constf32(0.0f);
+
+    auto Tap = [&](float dx, float dy) {
+      uint32_t coord = m_module.opFAdd(vec2Type, base, m_module.constvec2f32(dx + 0.5f, dy + 0.5f));
+      coord = m_module.opFDiv(vec2Type, coord, size);
+      return Compare(m_module.opImageSampleExplicitLod(vec4Type, sampledImage, coord, lod0));
+    };
+
+    const uint32_t s00 = Tap(0.0f, 0.0f);
+    const uint32_t s10 = Tap(1.0f, 0.0f);
+    const uint32_t s01 = Tap(0.0f, 1.0f);
+    const uint32_t s11 = Tap(1.0f, 1.0f);
+
+    uint32_t fx = 0, fy = 1;
+    fx = m_module.opCompositeExtract(floatType, frac, 1, &fx);
+    fy = m_module.opCompositeExtract(floatType, frac, 1, &fy);
+
+    const uint32_t top    = m_module.opFMix(resultType, s00, s10, fx);
+    const uint32_t bottom = m_module.opFMix(resultType, s01, s11, fx);
+    const uint32_t pcf    = m_module.opFMix(resultType, top, bottom, fy);
+
+    return m_module.opSelect(resultType, filterLinear, pcf, point);
+  }
+#endif
+
+
   void DxsoCompiler::emitInputSetup() {
     uint32_t pointCoord = 0;
     D3D9PointSizeInfoPS pointInfo;
@@ -3192,15 +3363,17 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       const auto& elem = m_isgn.elems[i];
       const uint32_t slot = elem.slot;
       
+      const bool uintInput = false;
+
       DxsoRegisterInfo info;
-      info.type.ctype   = DxsoScalarType::Float32;
+      info.type.ctype   = uintInput ? DxsoScalarType::Uint32 : DxsoScalarType::Float32;
       info.type.ccount  = 4;
       info.type.alength = 1;
       info.sclass       = spv::StorageClassInput;
 
       DxsoRegisterPointer inputPtr;
       inputPtr.id          = emitNewVariable(info);
-      inputPtr.type.ctype  = DxsoScalarType::Float32;
+      inputPtr.type.ctype  = info.type.ctype;
       inputPtr.type.ccount = info.type.ccount;
 
       m_module.decorateLocation(inputPtr.id, slot);
@@ -3225,6 +3398,28 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       indexPtr.type.ccount = 4;
 
       DxsoRegisterValue indexVal = this->emitValueLoad(inputPtr);
+      if (m_vtxScaleSpecConstant && slot < 16 && indexVal.type.ccount == 4) {
+        // Port: undo UNORM/SNORM normalization. Two bits per input:
+        // 1 = UBYTE4 (x255), 2 = SHORT2 (x32767 on xy; zw keep fetch defaults 0, 1), 3 = SHORT4.
+        uint32_t uintT  = m_module.defIntType(32, 0);
+        uint32_t boolT  = m_module.defBoolType();
+        uint32_t floatT = m_module.defFloatType(32);
+        uint32_t cls = m_module.opBitwiseAnd(uintT,
+          m_module.opShiftRightLogical(uintT, m_vtxScaleSpecConstant, m_module.constu32(2 * slot)),
+          m_module.constu32(3));
+        uint32_t isU8  = m_module.opIEqual(boolT, cls, m_module.constu32(1));
+        uint32_t isS   = m_module.opUGreaterThanEqual(boolT, cls, m_module.constu32(2));
+        uint32_t isS4  = m_module.opIEqual(boolT, cls, m_module.constu32(3));
+        uint32_t one   = m_module.constf32(1.0f);
+        uint32_t sxy = m_module.opSelect(floatT, isU8, m_module.constf32(255.0f),
+          m_module.opSelect(floatT, isS, m_module.constf32(32767.0f), one));
+        uint32_t szw = m_module.opSelect(floatT, isU8, m_module.constf32(255.0f),
+          m_module.opSelect(floatT, isS4, m_module.constf32(32767.0f), one));
+        uint32_t comps[4] = { sxy, sxy, szw, szw };
+        uint32_t vecT = getVectorTypeId(indexVal.type);
+        uint32_t scale = m_module.opCompositeConstruct(vecT, 4, comps);
+        indexVal.id = m_module.opFMul(vecT, indexVal.id, scale);
+      }
 
       DxsoRegisterValue workingReg;
       workingReg.type = indexVal.type;

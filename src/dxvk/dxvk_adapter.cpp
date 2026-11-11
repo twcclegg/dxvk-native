@@ -320,6 +320,12 @@ namespace dxvk {
     
     // Enable additional extensions if necessary
     extensionsEnabled.merge(m_extraExtensions);
+#ifdef __APPLE__
+    // Vulkan requires this extension to be enabled when the chosen device
+    // advertises it. No unsupported features are claimed or emulated here.
+    if (m_deviceExtensions.supports("VK_KHR_portability_subset"))
+      extensionsEnabled.add("VK_KHR_portability_subset");
+#endif
     DxvkNameList extensionNameList = extensionsEnabled.toNameList();
 
     // Enable additional device features if supported

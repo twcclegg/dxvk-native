@@ -15,7 +15,12 @@ namespace dxvk {
     MaxNumActiveBindings        =   384,
     MaxNumQueuedCommandBuffers  =    18,
     MaxNumQueryCountPerPool     =   128,
+#ifdef __APPLE__
+    // + D3D9SpecConstantId::SamplerDepthFilter (in-shader depth compare).
+    MaxNumSpecConstants         =    13,
+#else
     MaxNumSpecConstants         =    12,
+#endif
     MaxUniformBufferSize        = 65536,
     MaxVertexBindingStride      =  2048,
     MaxPushConstantSize         =   128,

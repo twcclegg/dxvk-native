@@ -868,6 +868,16 @@ namespace dxvk {
 
     void BindIndices();
 
+#if defined(__APPLE__)
+    bool CanFoldBaseVertex(INT BaseVertexIndex) const;
+
+    bool DrawIndexedRebased(
+            D3DPRIMITIVETYPE                  PrimitiveType,
+            INT                               BaseVertexIndex,
+            UINT                              StartIndex,
+            UINT                              PrimitiveCount);
+
+#endif
     D3D9DeviceLock LockDevice() {
       return m_multithread.AcquireLock();
     }
@@ -1126,6 +1136,10 @@ namespace dxvk {
 
     void UpdateSamplerDepthModeSpecConstant(uint32_t value);
 
+#ifdef __APPLE__
+    void UpdateSamplerDepthFilterSpecConstant(uint32_t value);
+#endif
+
     Com<D3D9InterfaceEx>            m_parent;
     D3DDEVTYPE                      m_deviceType;
     HWND                            m_window;
@@ -1210,6 +1224,9 @@ namespace dxvk {
     uint32_t                        m_lastBoolSpecConstantVertex = 0;
     uint32_t                        m_lastBoolSpecConstantPixel  = 0;
     uint32_t                        m_lastSamplerDepthMode = 0;
+#ifdef __APPLE__
+    uint32_t                        m_lastSamplerDepthFilter = 0;
+#endif
     uint32_t                        m_lastProjectionBitfield = 0;
     uint32_t                        m_lastSamplerTypes = 0;
     uint32_t                        m_lastPointMode = 0;
