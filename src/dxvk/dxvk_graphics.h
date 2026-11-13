@@ -223,9 +223,10 @@ namespace dxvk {
     alignas(CACHE_LINE_SIZE) sync::Spinlock   m_mutex;
     std::vector<DxvkGraphicsPipelineInstance> m_pipelines;
     
-    DxvkGraphicsPipelineInstance* createInstance(
+    bool createInstance(
       const DxvkGraphicsPipelineStateInfo& state,
-      const DxvkRenderPass*                renderPass);
+      const DxvkRenderPass*                renderPass,
+            VkPipeline*                    pipeline);
     
     DxvkGraphicsPipelineInstance* findInstance(
       const DxvkGraphicsPipelineStateInfo& state,

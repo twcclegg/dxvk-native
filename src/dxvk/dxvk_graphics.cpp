@@ -63,48 +63,64 @@ namespace dxvk {
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    DxvkGraphicsPipelineInstance* instance = nullptr;
-
     { std::lock_guard<sync::Spinlock> lock(m_mutex);
     
-      instance = this->findInstance(state, renderPass);
-      
-      if (instance)
+      if (auto instance = this->findInstance(state, renderPass))
         return instance->pipeline();
-      
-      instance = this->createInstance(state, renderPass);
     }
     
-    if (!instance)
-      return VK_NULL_HANDLE;
-
-    this->writePipelineStateToCache(state, renderPass->format());
-    return instance->pipeline();
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    
+    if (this->createInstance(state, renderPass, &pipeline))
+      this->writePipelineStateToCache(state, renderPass->format());
+    
+    return pipeline;
   }
 
 
   void DxvkGraphicsPipeline::compilePipeline(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    std::lock_guard<sync::Spinlock> lock(m_mutex);
-
-    if (!this->findInstance(state, renderPass))
-      this->createInstance(state, renderPass);
+    { std::lock_guard<sync::Spinlock> lock(m_mutex);
+    
+      if (this->findInstance(state, renderPass))
+        return;
+    }
+    
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    this->createInstance(state, renderPass, &pipeline);
   }
 
 
-  DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
+  bool DxvkGraphicsPipeline::createInstance(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) {
+    const DxvkRenderPass*                renderPass,
+          VkPipeline*                    pipeline) {
     // If the pipeline state vector is invalid, don't try
     // to create a new pipeline, it won't work anyway.
     if (!this->validatePipelineState(state))
-      return nullptr;
+      return false;
 
+    // Compile without holding the lock. A compile can take tens of
+    // milliseconds, and the thread recording draws must not wait behind
+    // the state cache compiling other state vectors of this pipeline.
+    // If another thread added the same state meanwhile, keep its pipeline.
     VkPipeline newPipelineHandle = this->createPipeline(state, renderPass);
 
-    m_pipeMgr->m_numGraphicsPipelines += 1;
-    return &m_pipelines.emplace_back(state, renderPass, newPipelineHandle);
+    { std::lock_guard<sync::Spinlock> lock(m_mutex);
+
+      if (auto instance = this->findInstance(state, renderPass)) {
+        *pipeline = instance->pipeline();
+      } else {
+        m_pipelines.emplace_back(state, renderPass, newPipelineHandle);
+        m_pipeMgr->m_numGraphicsPipelines += 1;
+        *pipeline = newPipelineHandle;
+        return true;
+      }
+    }
+
+    this->destroyPipeline(newPipelineHandle);
+    return false;
   }
   
   
