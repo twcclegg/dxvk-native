@@ -63,22 +63,14 @@ namespace dxvk {
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    DxvkGraphicsPipelineInstance* instance = nullptr;
+    bool created = false;
+    DxvkGraphicsPipelineInstance* instance = this->getInstance(state, renderPass, &created);
 
-    { std::lock_guard<sync::Spinlock> lock(m_mutex);
-    
-      instance = this->findInstance(state, renderPass);
-      
-      if (instance)
-        return instance->pipeline();
-      
-      instance = this->createInstance(state, renderPass);
-    }
-    
     if (!instance)
       return VK_NULL_HANDLE;
 
-    this->writePipelineStateToCache(state, renderPass->format());
+    if (created)
+      this->writePipelineStateToCache(state, renderPass->format());
     return instance->pipeline();
   }
 
@@ -86,25 +78,60 @@ namespace dxvk {
   void DxvkGraphicsPipeline::compilePipeline(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    std::lock_guard<sync::Spinlock> lock(m_mutex);
-
-    if (!this->findInstance(state, renderPass))
-      this->createInstance(state, renderPass);
+    bool created = false;
+    this->getInstance(state, renderPass, &created);
   }
 
 
-  DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
+  DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::getInstance(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) {
+    const DxvkRenderPass*                renderPass,
+          bool*                          created) {
+    std::unique_lock<dxvk::mutex> lock(m_mutex);
+
+    for (;;) {
+      DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
+
+      if (instance)
+        return instance;
+
+      bool pending = false;
+      for (auto& p : m_pending)
+        pending |= p.isCompatible(state, renderPass);
+
+      if (!pending)
+        break;
+
+      // Another thread is compiling exactly this instance
+      m_cond.wait(lock);
+    }
+
     // If the pipeline state vector is invalid, don't try
     // to create a new pipeline, it won't work anyway.
     if (!this->validatePipelineState(state))
       return nullptr;
 
+    m_pending.emplace_back(state, renderPass, VK_NULL_HANDLE);
+    lock.unlock();
+
     VkPipeline newPipelineHandle = this->createPipeline(state, renderPass);
 
+    lock.lock();
+
+    for (size_t i = 0; i < m_pending.size(); i++) {
+      if (m_pending[i].isCompatible(state, renderPass)) {
+        m_pending[i] = m_pending.back();
+        m_pending.pop_back();
+        break;
+      }
+    }
+
     m_pipeMgr->m_numGraphicsPipelines += 1;
-    return &m_pipelines.emplace_back(state, renderPass, newPipelineHandle);
+    DxvkGraphicsPipelineInstance* instance = &m_pipelines.emplace_back(state, renderPass, newPipelineHandle);
+    *created = true;
+
+    m_cond.notify_all();
+    return instance;
   }
   
   
