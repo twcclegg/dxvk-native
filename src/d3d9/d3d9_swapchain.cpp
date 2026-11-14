@@ -1,4 +1,5 @@
 #include "d3d9_swapchain.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -294,9 +295,18 @@ namespace dxvk {
         uint64_t idle = m_device->getStatCounters().getCtr(DxvkStatCounter::GpuIdleTicks);
         uint64_t idleDiff = idle - lastIdle;
         double busy = us > idleDiff ? double(us - idleDiff) / double(us) : 0.0;
+        // LB_STEREO_DUP (dxso_util.h): main-scene draws issued a second time, counted on the CS thread (which
+        // may trail this thread by a frame or so; immaterial over the logging interval).
+        static uint64_t lastDup = 0;
+        const uint64_t dup = m_parent->GetStereoDupDrawCount();
+        char dupText[64] = "";
+        if (DxsoStereoDupEnabled())
+          std::snprintf(dupText, sizeof(dupText), ", dup %.0f draws per frame",
+            double(dup - lastDup) / double(std::max(frames, 1u)));
         if (lastIdle)
-          std::fprintf(stderr, "dxvk: gpu busy %.0f%%, %.1f ms per frame over %u frames (%.0f fps)\n",
-            busy * 100.0, busy * double(us) / 1000.0 / frames, frames, frames * 1e6 / double(us));
+          std::fprintf(stderr, "dxvk: gpu busy %.0f%%, %.1f ms per frame over %u frames (%.0f fps)%s\n",
+            busy * 100.0, busy * double(us) / 1000.0 / frames, frames, frames * 1e6 / double(us), dupText);
+        lastDup = dup;
         lastIdle = idle;
         lastTime = now;
         frames = 0;

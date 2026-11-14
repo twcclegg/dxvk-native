@@ -12,6 +12,11 @@
  * k is applied per draw and only to passes whose viewport has the back buffer's aspect ratio (the main scene),
  * not to square shadow maps of spot/point lights or other off-screen passes; LB_STEREO_PASSES=all applies it to
  * every perspective draw. Fixed-function vertex processing is never shifted.
+ *
+ * LB_STEREO_DUP=<k> (timing experiment, twcclegg/skyrim-apple#23 stage 0): every draw k applies to is issued
+ * twice on the DXVK command thread, the copy with the negated offset, into the same render targets. k is the
+ * clip-space x shift used while no offset is set here (so =1 works in mono play). The swap chain's
+ * "dxvk: gpu busy" log line then ends in ", dup <N> draws per frame". Details in src/dxso/dxso_util.h.
  */
 #ifndef DXVK_STEREO_H
 #define DXVK_STEREO_H

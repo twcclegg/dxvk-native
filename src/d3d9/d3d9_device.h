@@ -26,6 +26,7 @@
 
 #include "d3d9_shader_permutations.h"
 
+#include <atomic>
 #include <vector>
 #include <type_traits>
 #include <unordered_map>
@@ -827,7 +828,17 @@ namespace dxvk {
     void UpdateClipPlanes();
 
     void UpdateStereoClipShift();
-    
+
+    /* LB_STEREO_DUP (dxso_util.h). CS thread only: draws the current draw a second time with the mirrored
+     * eye shift (the second half of the clip-plane buffer), then rebinds the normal half. */
+    template <typename DrawFn>
+    void DrawStereoDuplicate(DxvkContext* ctx, const DrawFn& draw);
+
+    /* Total of duplicated draws so far (CS thread increments it), for the swap chain's log. */
+    uint64_t GetStereoDupDrawCount() const {
+      return m_stereoDupDraws.load(std::memory_order_relaxed);
+    }
+
     template <uint32_t Offset, uint32_t Length>
     void UpdatePushConstant(const void* pData);
 
@@ -1233,6 +1244,10 @@ namespace dxvk {
     uint32_t                        m_lastSamplerTypes = 0;
     uint32_t                        m_lastPointMode = 0;
     std::array<float, 4>            m_stereoClipShiftBound = {}; // dxvk_stereo.h: clip-space offset xyzw
+    bool                            m_stereoDupDraw = false;     // LB_STEREO_DUP: duplicate the next draw
+    DxvkBufferSlice                 m_vsClipPlanesMain;          // LB_STEREO_DUP: first half of m_vsClipPlanes
+    DxvkBufferSlice                 m_vsClipPlanesMirrored;      // LB_STEREO_DUP: second half, shift negated
+    std::atomic<uint64_t>           m_stereoDupDraws = { 0u };   // LB_STEREO_DUP: draws duplicated (CS thread)
     uint32_t                        m_lastFetch4    = 0;
     uint32_t                        m_lastHazardsDS = 0;
     uint32_t                        m_lastSamplerTypesFF = 0;
