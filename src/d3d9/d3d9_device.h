@@ -1232,7 +1232,7 @@ namespace dxvk {
     uint32_t                        m_lastProjectionBitfield = 0;
     uint32_t                        m_lastSamplerTypes = 0;
     uint32_t                        m_lastPointMode = 0;
-    float                           m_stereoClipShiftBound = 0.0f; // dxvk_stereo.h
+    std::array<float, 4>            m_stereoClipShiftBound = {}; // dxvk_stereo.h: clip-space offset xyzw
     uint32_t                        m_lastFetch4    = 0;
     uint32_t                        m_lastHazardsDS = 0;
     uint32_t                        m_lastSamplerTypesFF = 0;

@@ -30,6 +30,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
+#include <mutex>
+#include <string>
 #include <cfloat>
 #ifdef MSC_VER
 #pragma fenv_access (on)
@@ -4969,7 +4972,8 @@ namespace dxvk {
         : D3D9ClipPlane();
     }
 
-    dst[DxsoStereoClipShiftIndex] = D3D9ClipPlane{ { m_stereoClipShiftBound, 0.0f, 0.0f, 0.0f } };
+    dst[DxsoStereoClipShiftIndex] = D3D9ClipPlane{ { m_stereoClipShiftBound[0], m_stereoClipShiftBound[1],
+                                                       m_stereoClipShiftBound[2], m_stereoClipShiftBound[3] } };
 
     EmitCs([
       cBuffer = m_vsClipPlanes,
@@ -4981,23 +4985,35 @@ namespace dxvk {
 
 
   namespace {
-    std::atomic<float> g_stereoClipShift = { 0.0f };
+    // Set between frames by the runtime, read at draws on the CS-recording thread.
+    std::mutex           g_stereoMutex;
+    std::array<float, 4> g_stereoClipShift = {};
   }
 
 
   void D3D9DeviceEx::UpdateStereoClipShift() {
-    float k = g_stereoClipShift.load(std::memory_order_relaxed);
+    std::array<float, 4> k;
+    { std::lock_guard<std::mutex> lock(g_stereoMutex); k = g_stereoClipShift; }
+    const bool any = k[0] != 0.0f || k[1] != 0.0f || k[2] != 0.0f || k[3] != 0.0f;
 
-    // Only the main scene's passes: a viewport with the back buffer's aspect ratio. Spot/point light shadow
-    // maps and environment maps are square and stay as the centre eye rendered them.
-    static const bool allPasses = env::getEnvVar("LB_STEREO_PASSES") == "all";
-    if (k != 0.0f && !allPasses && m_implicitSwapchain != nullptr) {
+    // Only the main scene's passes: by default a viewport with the back buffer's aspect ratio, so spot/point
+    // light shadow maps and environment maps (square) stay as the centre eye rendered them. LB_STEREO_PASSES=size
+    // asks for the back buffer's exact size instead (square back buffers, as in VR180 captures); =all for every
+    // perspective pass.
+    static const std::string passes = env::getEnvVar("LB_STEREO_PASSES");
+    if (any && passes != "all" && m_implicitSwapchain != nullptr) {
       const D3DPRESENT_PARAMETERS* pp = m_implicitSwapchain->GetPresentParams();
       const D3DVIEWPORT9& vp = m_state.viewport;
-      const double a = double(vp.Width)  * double(pp->BackBufferHeight);
-      const double b = double(vp.Height) * double(pp->BackBufferWidth);
-      if (vp.Width == 0 || vp.Height == 0 || std::abs(a - b) > 0.01 * b)
-        k = 0.0f;
+      bool main;
+      if (passes == "size") {
+        main = vp.Width == pp->BackBufferWidth && vp.Height == pp->BackBufferHeight;
+      } else {
+        const double a = double(vp.Width)  * double(pp->BackBufferHeight);
+        const double b = double(vp.Height) * double(pp->BackBufferWidth);
+        main = vp.Width != 0 && vp.Height != 0 && std::abs(a - b) <= 0.01 * b;
+      }
+      if (!main)
+        k = {};
     }
 
     if (k != m_stereoClipShiftBound) {
@@ -7440,7 +7456,13 @@ namespace dxvk {
 
 
 extern "C" void dxvk_stereo_set_clip_shift(float k) {
-  dxvk::g_stereoClipShift.store(k, std::memory_order_relaxed);
+  dxvk_stereo_set_clip_offset(k, 0.0f, 0.0f, 0.0f);
+}
+
+
+extern "C" void dxvk_stereo_set_clip_offset(float x, float y, float z, float w) {
+  std::lock_guard<std::mutex> lock(dxvk::g_stereoMutex);
+  dxvk::g_stereoClipShift = {{ x, y, z, w }};
 }
 
 

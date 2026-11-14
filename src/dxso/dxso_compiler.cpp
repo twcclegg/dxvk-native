@@ -3659,7 +3659,7 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     m_module.memberDecorateOffset (clipPlaneStruct, 0, 0);
 
     if (stereoShift) {
-      // vec4 right after the clip planes: x = clip-space eye shift k, yzw unused.
+      // vec4 right after the clip planes: the clip-space eye offset (x alone for a sideways eye).
       m_module.setDebugMemberName   (clipPlaneStruct, 1, "stereo_shift");
       m_module.memberDecorateOffset (clipPlaneStruct, 1, DxsoStereoClipShiftIndex * 16);
     }
@@ -3722,22 +3722,25 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         m_module.constu32(1),
         m_module.constu32(0),
       }};
-      uint32_t shiftId = m_module.opLoad(floatType,
+      // The whole vec4: x alone for a sideways eye (set_clip_shift), or any eye translation (set_clip_offset).
+      uint32_t shiftId = m_module.opLoad(vec4Type,
         m_module.opAccessChain(
-          m_module.defPointerType(floatType, spv::StorageClassUniform),
-          clipPlaneBlock, 2, shiftMembers.data()));
+          m_module.defPointerType(vec4Type, spv::StorageClassUniform),
+          clipPlaneBlock, 1, shiftMembers.data()));
 
-      const uint32_t xIndex = 0, wIndex = 3;
-      uint32_t posX = m_module.opCompositeExtract(floatType, positionId, 1, &xIndex);
+      const uint32_t wIndex = 3;
       uint32_t posW = m_module.opCompositeExtract(floatType, positionId, 1, &wIndex);
 
       uint32_t perspective = m_module.opFOrdGreaterThan(boolType,
         m_module.opFAbs(floatType, m_module.opFSub(floatType, posW, m_module.constf32(1.0f))),
         m_module.constf32(1e-5f));
 
-      uint32_t shift = m_module.opSelect(floatType, perspective, shiftId, m_module.constf32(0.0f));
-      uint32_t shifted = m_module.opCompositeInsert(vec4Type,
-        m_module.opFSub(floatType, posX, shift), positionId, 1, &xIndex);
+      uint32_t zero4 = m_module.constvec4f32(0.0f, 0.0f, 0.0f, 0.0f);
+      uint32_t bool4 = m_module.defVectorType(boolType, 4);
+      std::array<uint32_t, 4> persp4 = {{ perspective, perspective, perspective, perspective }};
+      uint32_t perspectiveVec = m_module.opCompositeConstruct(bool4, 4, persp4.data());
+      uint32_t shift = m_module.opSelect(vec4Type, perspectiveVec, shiftId, zero4);
+      uint32_t shifted = m_module.opFSub(vec4Type, positionId, shift);
 
       m_module.opStore(positionPtr, shifted);
     }
