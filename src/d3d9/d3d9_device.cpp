@@ -2389,6 +2389,33 @@ namespace dxvk {
   }
 
 
+  namespace {
+    /* LB_STEREO_DUP (dxso_util.h). With the switch on, m_vsClipPlanes holds the clip block (six planes and the
+     * eye shift) twice in every slice: at 0 as the draws use it, and at StereoMirroredOffset with the shift
+     * negated, both written by UpdateClipPlanes into the same slice. 256 bytes is the largest
+     * minUniformBufferOffsetAlignment Vulkan allows, so the second half is a valid binding offset everywhere. */
+    constexpr VkDeviceSize StereoClipBlockSize  = (caps::MaxClipPlanes + 1) * sizeof(D3D9ClipPlane);
+    constexpr VkDeviceSize StereoMirroredOffset = 256;
+    constexpr uint32_t     StereoClipPlaneSlot  = computeResourceSlotId(
+      DxsoProgramType::VertexShader, DxsoBindingType::ConstantBuffer, DxsoConstantBuffers::VSClipPlanes);
+    static_assert(StereoClipBlockSize <= StereoMirroredOffset, "clip block fits in half the buffer");
+  }
+
+
+  template <typename DrawFn>
+  void D3D9DeviceEx::DrawStereoDuplicate(DxvkContext* ctx, const DrawFn& draw) {
+    // Same buffer and range length as the normal binding, only the offset differs, so DxvkContext treats the
+    // switch as a descriptor offset change (a new dynamic offset when the pipeline layout has the binding as a
+    // dynamic uniform buffer; a rewritten descriptor set otherwise). Both halves live in the buffer's current
+    // slice, which the CS stream already renamed to (invalidateBuffer) before this draw, and which the command
+    // list keeps alive until the GPU is done with it, as for any other draw.
+    ctx->bindResourceBuffer(StereoClipPlaneSlot, m_vsClipPlanesMirrored);
+    draw();
+    ctx->bindResourceBuffer(StereoClipPlaneSlot, m_vsClipPlanesMain);
+    m_stereoDupDraws.fetch_add(1, std::memory_order_relaxed);
+  }
+
+
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::DrawPrimitive(
           D3DPRIMITIVETYPE PrimitiveType,
           UINT             StartVertex,
@@ -2407,7 +2434,8 @@ namespace dxvk {
       cPrimType    = PrimitiveType,
       cPrimCount   = PrimitiveCount,
       cStartVertex = StartVertex,
-      cInstanceCount = GetInstanceCount()
+      cInstanceCount = GetInstanceCount(),
+      cStereoDup   = m_stereoDupDraw
     ](DxvkContext* ctx) {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
 
@@ -2416,6 +2444,14 @@ namespace dxvk {
       ctx->draw(
         drawInfo.vertexCount, drawInfo.instanceCount,
         cStartVertex, 0);
+
+      if (unlikely(cStereoDup)) {
+        DrawStereoDuplicate(ctx, [&] {
+          ctx->draw(
+            drawInfo.vertexCount, drawInfo.instanceCount,
+            cStartVertex, 0);
+        });
+      }
     });
 
     return D3D_OK;
@@ -2454,7 +2490,8 @@ namespace dxvk {
       cPrimCount       = PrimitiveCount,
       cStartIndex      = StartIndex,
       cBaseVertexIndex = BaseVertexIndex,
-      cInstanceCount   = GetInstanceCount()
+      cInstanceCount   = GetInstanceCount(),
+      cStereoDup       = m_stereoDupDraw
     ](DxvkContext* ctx) {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
 
@@ -2464,6 +2501,15 @@ namespace dxvk {
         drawInfo.vertexCount, drawInfo.instanceCount,
         cStartIndex,
         cBaseVertexIndex, 0);
+
+      if (unlikely(cStereoDup)) {
+        DrawStereoDuplicate(ctx, [&] {
+          ctx->drawIndexed(
+            drawInfo.vertexCount, drawInfo.instanceCount,
+            cStartIndex,
+            cBaseVertexIndex, 0);
+        });
+      }
     });
 
     return D3D_OK;
@@ -2498,7 +2544,8 @@ namespace dxvk {
       cPrimType     = PrimitiveType,
       cPrimCount    = PrimitiveCount,
       cInstanceCount = GetInstanceCount(),
-      cStride       = VertexStreamZeroStride
+      cStride       = VertexStreamZeroStride,
+      cStereoDup    = m_stereoDupDraw
     ](DxvkContext* ctx) {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
 
@@ -2508,6 +2555,15 @@ namespace dxvk {
       ctx->draw(
         drawInfo.vertexCount, drawInfo.instanceCount,
         0, 0);
+
+      if (unlikely(cStereoDup)) {
+        DrawStereoDuplicate(ctx, [&] {
+          ctx->draw(
+            drawInfo.vertexCount, drawInfo.instanceCount,
+            0, 0);
+        });
+      }
+
       ctx->bindVertexBuffer(0, DxvkBufferSlice(), 0);
     });
 
@@ -2561,7 +2617,8 @@ namespace dxvk {
       cStride       = VertexStreamZeroStride,
       cInstanceCount = GetInstanceCount(),
       cIndexType    = DecodeIndexType(
-                        static_cast<D3D9Format>(IndexDataFormat))
+                        static_cast<D3D9Format>(IndexDataFormat)),
+      cStereoDup    = m_stereoDupDraw
     ](DxvkContext* ctx) {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
 
@@ -2573,6 +2630,16 @@ namespace dxvk {
         drawInfo.vertexCount, drawInfo.instanceCount,
         0,
         0, 0);
+
+      if (unlikely(cStereoDup)) {
+        DrawStereoDuplicate(ctx, [&] {
+          ctx->drawIndexed(
+            drawInfo.vertexCount, drawInfo.instanceCount,
+            0,
+            0, 0);
+        });
+      }
+
       ctx->bindVertexBuffer(0, DxvkBufferSlice(), 0);
       ctx->bindIndexBuffer(DxvkBufferSlice(), VK_INDEX_TYPE_UINT32);
     });
@@ -4894,11 +4961,28 @@ namespace dxvk {
     // One vec4 more than the clip planes: the stereo eye shift (dxvk_stereo.h), zero unless set.
     static_assert(DxsoStereoClipShiftIndex == caps::MaxClipPlanes, "stereo shift follows the clip planes");
     // With multiview a second vec4 follows: view 1's shift (stereo_shift becomes vec4[2]).
+    // LB_STEREO_DUP (mono only): the block twice, the second copy with the shift negated, at
+    // StereoMirroredOffset (see above DrawStereoDuplicate). Both halves are bound with the same range length,
+    // so switching between them is only an offset change for DxvkContext.
+    const bool stereoDup = IsStereoDupActive();
     m_vsClipPlanes =
       CreateConstantBuffer(false,
-                           (caps::MaxClipPlanes + (IsStereoMultiview() ? DxsoStereoViewCount * 6 : 1)) * sizeof(D3D9ClipPlane),
+                           stereoDup
+                             ? StereoMirroredOffset + StereoClipBlockSize
+                             : (caps::MaxClipPlanes + (IsStereoMultiview() ? DxsoStereoViewCount * 6 : 1)) * sizeof(D3D9ClipPlane),
                            DxsoProgramType::VertexShader,
                            DxsoConstantBuffers::VSClipPlanes);
+
+    if (unlikely(stereoDup)) {
+      m_vsClipPlanesMain     = DxvkBufferSlice(m_vsClipPlanes, 0,                    StereoClipBlockSize);
+      m_vsClipPlanesMirrored = DxvkBufferSlice(m_vsClipPlanes, StereoMirroredOffset, StereoClipBlockSize);
+
+      EmitCs([
+        cSlice = m_vsClipPlanesMain
+      ] (DxvkContext* ctx) {
+        ctx->bindResourceBuffer(StereoClipPlaneSlot, cSlice);
+      });
+    }
 
     m_vsFixedFunction =
       CreateConstantBuffer(false,
@@ -5032,6 +5116,19 @@ namespace dxvk {
       }
     }
 
+    // LB_STEREO_DUP: the same block again for the duplicate draws, with the opposite eye's shift. Written into
+    // the same slice, so it is renamed, kept alive and freed together with the first half.
+    if (unlikely(IsStereoDupActive())) {
+      auto mirrored = reinterpret_cast<D3D9ClipPlane*>(
+        reinterpret_cast<uint8_t*>(slice.mapPtr) + StereoMirroredOffset);
+
+      for (uint32_t i = 0; i < caps::MaxClipPlanes; i++)
+        mirrored[i] = dst[i];
+
+      mirrored[DxsoStereoClipShiftIndex] = D3D9ClipPlane{ { -m_stereoClipShiftBound[0][0], -m_stereoClipShiftBound[0][1],
+                                                              -m_stereoClipShiftBound[0][2], -m_stereoClipShiftBound[0][3] } };
+    }
+
     EmitCs([
       cBuffer = m_vsClipPlanes,
       cSlice  = slice
@@ -5106,6 +5203,16 @@ namespace dxvk {
     for (const auto& v : k)
       any |= v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f || v[3] != 0.0f;
 
+    // LB_STEREO_DUP (mono only) without an eye offset from the runtime (ordinary mono play): the switch's own
+    // x shift.
+    const bool stereoDup = IsStereoDupActive();
+    if (unlikely(stereoDup) && k[0][0] == 0.0f && k[0][1] == 0.0f && k[0][2] == 0.0f && k[0][3] == 0.0f) {
+      k[0] = {{ DxsoStereoDupOffset(), 0.0f, 0.0f, 0.0f }};
+      any = true;
+    }
+
+    bool main = true;
+
     // Only the main scene's passes: by default a viewport with the back buffer's aspect ratio, so spot/point
     // light shadow maps and environment maps (square) stay as the centre eye rendered them. LB_STEREO_PASSES=size
     // asks for the back buffer's exact size instead (square back buffers, as in VR180 captures); =all for every
@@ -5114,7 +5221,6 @@ namespace dxvk {
     if (any && passes != "all" && m_implicitSwapchain != nullptr) {
       const D3DPRESENT_PARAMETERS* pp = m_implicitSwapchain->GetPresentParams();
       const D3DVIEWPORT9& vp = m_state.viewport;
-      bool main;
       if (passes == "size") {
         main = vp.Width == pp->BackBufferWidth && vp.Height == pp->BackBufferHeight;
       } else {
@@ -5128,6 +5234,9 @@ namespace dxvk {
         u = {};
       }
     }
+
+    // LB_STEREO_DUP: the draws this shift applies to are the ones issued twice (DrawStereoDuplicate).
+    m_stereoDupDraw = stereoDup && any && main;
 
     if (k != m_stereoClipShiftBound || m != m_stereoClipMatrixBound || u != m_stereoUiShiftBound) {
       m_stereoClipShiftBound = k;
@@ -6656,7 +6765,8 @@ namespace dxvk {
       cRestoreType   = DecodeIndexType(ibo->Desc()->Format),
       cPrimType      = PrimitiveType,
       cPrimCount     = PrimitiveCount,
-      cInstanceCount = GetInstanceCount()
+      cInstanceCount = GetInstanceCount(),
+      cStereoDup     = m_stereoDupDraw
     ](DxvkContext* ctx) {
       auto drawInfo = GenerateDrawInfo(cPrimType, cPrimCount, cInstanceCount);
 
@@ -6666,6 +6776,15 @@ namespace dxvk {
       ctx->drawIndexed(
         drawInfo.vertexCount, drawInfo.instanceCount,
         0, 0, 0);
+
+      if (unlikely(cStereoDup)) {
+        DrawStereoDuplicate(ctx, [&] {
+          ctx->drawIndexed(
+            drawInfo.vertexCount, drawInfo.instanceCount,
+            0, 0, 0);
+        });
+      }
+
       ctx->bindIndexBuffer(cRestoreSlice, cRestoreType);
     });
 
