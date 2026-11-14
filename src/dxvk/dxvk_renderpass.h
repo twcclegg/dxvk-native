@@ -34,6 +34,9 @@ namespace dxvk {
     VkSampleCountFlagBits sampleCount = VK_SAMPLE_COUNT_1_BIT;
     DxvkAttachmentFormat  depth;
     DxvkAttachmentFormat  color[MaxNumRenderTargets];
+    /// Apple port (stereo): Vulkan multiview view mask of the single subpass, 0 for an ordinary pass.
+    /// Non-zero only when the device has multiview enabled and every attachment has a layer per view.
+    uint32_t              viewMask = 0;
     
     bool eq(const DxvkRenderPassFormat& fmt) const;
 

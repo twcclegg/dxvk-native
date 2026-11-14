@@ -60,7 +60,8 @@ namespace dxvk {
   
   bool DxvkFramebuffer::hasTargets(const DxvkRenderTargets& renderTargets) {
     bool eq = m_renderTargets.depth.view   == renderTargets.depth.view
-           && m_renderTargets.depth.layout == renderTargets.depth.layout;
+           && m_renderTargets.depth.layout == renderTargets.depth.layout
+           && m_renderTargets.viewMask     == renderTargets.viewMask;
     
     for (uint32_t i = 0; i < MaxNumRenderTargets && eq; i++) {
       eq &= m_renderTargets.color[i].view   == renderTargets.color[i].view
@@ -72,9 +73,15 @@ namespace dxvk {
   
   
   bool DxvkFramebuffer::isFullSize(const Rc<DxvkImageView>& view) const {
+    // In a multiview pass the framebuffer has one layer, and a view is
+    // covered entirely when it has exactly one layer per view in the mask.
+    uint32_t layers = m_renderTargets.viewMask
+      ? 32u - uint32_t(bit::lzcnt(m_renderTargets.viewMask))
+      : m_renderSize.layers;
+
     return m_renderSize.width  == view->mipLevelExtent(0).width
         && m_renderSize.height == view->mipLevelExtent(0).height
-        && m_renderSize.layers == view->info().numLayers;
+        && layers              == view->info().numLayers;
   }
 
 
@@ -100,7 +107,8 @@ namespace dxvk {
       format.depth.format = renderTargets.depth.view->info().format;
       format.depth.layout = renderTargets.depth.layout;
     }
-    
+
+    format.viewMask = renderTargets.viewMask;
     return format;
   }
   
@@ -126,6 +134,11 @@ namespace dxvk {
         minSize.layers = std::min(minSize.layers, colorSize.layers);
       }
     }
+
+    // With a view mask the layers are addressed by the views, and
+    // VkFramebufferCreateInfo::layers must be 1 (VUID-VkFramebufferCreateInfo-renderPass-02531).
+    if (m_renderTargets.viewMask)
+      minSize.layers = 1;
     
     return minSize;
   }

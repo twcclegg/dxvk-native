@@ -3640,12 +3640,21 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     uint32_t floatType = m_module.defFloatType(32);
     uint32_t vec4Type  = m_module.defVectorType(floatType, 4);
     
-    // Apple port experiment: true-stereo eye shift (DxsoStereoClipShiftEnabled in dxso_util.h).
-    const bool stereoShift = DxsoStereoClipShiftEnabled();
+    // Apple port experiment: true-stereo eye shift (DxsoStereoClipShiftEnabled in dxso_util.h), one
+    // offset per view with multiview (DxsoStereoMultiviewRequested).
+    const bool stereoMultiview = m_moduleInfo.options.stereoMultiview;
+    const bool stereoShift = DxsoStereoClipShiftEnabled() || stereoMultiview;
 
     // Declare uniform buffer containing clip planes
     uint32_t clipPlaneArray  = m_module.defArrayTypeUnique(vec4Type, clipPlaneCountId);
-    std::array<uint32_t, 2> clipPlaneMembers = {{ clipPlaneArray, vec4Type }};
+    uint32_t stereoShiftType = vec4Type;
+
+    if (stereoMultiview) {
+      stereoShiftType = m_module.defArrayTypeUnique(vec4Type, m_module.constu32(DxsoStereoViewCount));
+      m_module.decorateArrayStride(stereoShiftType, 16);
+    }
+
+    std::array<uint32_t, 2> clipPlaneMembers = {{ clipPlaneArray, stereoShiftType }};
     uint32_t clipPlaneStruct = m_module.defStructTypeUnique(stereoShift ? 2 : 1, clipPlaneMembers.data());
     uint32_t clipPlaneBlock  = m_module.newVar(
       m_module.defPointerType(clipPlaneStruct, spv::StorageClassUniform),
@@ -3722,11 +3731,31 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         m_module.constu32(1),
         m_module.constu32(0),
       }};
+      uint32_t shiftMemberCount = 1;
+
+      if (stereoMultiview) {
+        /* Multiview: stereo_shift is vec4[2] and each view reads its own, stereo_shift[gl_ViewIndex]. In an
+         * ordinary (non-multiview) render pass ViewIndex is 0 (Vulkan spec, BuiltIn ViewIndex), so the same
+         * SPIR-V serves mono passes with view 0's offset. */
+        m_module.enableCapability(spv::CapabilityMultiView);
+
+        uint32_t intType = m_module.defIntType(32, 1);
+        uint32_t viewIndexVar = m_module.newVar(
+          m_module.defPointerType(intType, spv::StorageClassInput),
+          spv::StorageClassInput);
+        m_module.decorateBuiltIn(viewIndexVar, spv::BuiltInViewIndex);
+        m_module.setDebugName(viewIndexVar, "view_index");
+        m_entryPointInterfaces.push_back(viewIndexVar);
+
+        shiftMembers[1] = m_module.opLoad(intType, viewIndexVar);
+        shiftMemberCount = 2;
+      }
+
       // The whole vec4: x alone for a sideways eye (set_clip_shift), or any eye translation (set_clip_offset).
       uint32_t shiftId = m_module.opLoad(vec4Type,
         m_module.opAccessChain(
           m_module.defPointerType(vec4Type, spv::StorageClassUniform),
-          clipPlaneBlock, 1, shiftMembers.data()));
+          clipPlaneBlock, shiftMemberCount, shiftMembers.data()));
 
       const uint32_t wIndex = 3;
       uint32_t posW = m_module.opCompositeExtract(floatType, positionId, 1, &wIndex);

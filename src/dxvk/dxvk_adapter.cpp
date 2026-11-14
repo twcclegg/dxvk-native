@@ -222,6 +222,8 @@ namespace dxvk {
                 || !required.core.features.inheritedQueries)
         && (m_deviceFeatures.shaderDrawParameters.shaderDrawParameters
                 || !required.shaderDrawParameters.shaderDrawParameters)
+        && (m_deviceFeatures.coreMultiview.multiview
+                || !required.coreMultiview.multiview)
         && (m_deviceFeatures.ext4444Formats.formatA4R4G4B4
                 || !required.ext4444Formats.formatA4R4G4B4)
         && (m_deviceFeatures.ext4444Formats.formatA4B4G4R4
@@ -355,6 +357,13 @@ namespace dxvk {
 
     enabledFeatures.shaderDrawParameters.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
     enabledFeatures.shaderDrawParameters.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.shaderDrawParameters);
+
+    // Apple port (stereo, LB_STEREO_MULTIVIEW): only chained when a client asked for multiview, so the
+    // device create info is unchanged otherwise. Multiview is core in Vulkan 1.1, no extension needed.
+    if (enabledFeatures.coreMultiview.multiview) {
+      enabledFeatures.coreMultiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
+      enabledFeatures.coreMultiview.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.coreMultiview);
+    }
 
     if (devExtensions.ext4444Formats) {
       enabledFeatures.ext4444Formats.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT;
@@ -651,6 +660,11 @@ namespace dxvk {
     m_deviceFeatures.shaderDrawParameters.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
     m_deviceFeatures.shaderDrawParameters.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.shaderDrawParameters);
 
+    if (m_deviceInfo.core.properties.apiVersion >= VK_API_VERSION_1_1) {
+      m_deviceFeatures.coreMultiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
+      m_deviceFeatures.coreMultiview.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.coreMultiview);
+    }
+
     if (m_deviceExtensions.supports(VK_EXT_4444_FORMATS_EXTENSION_NAME)) {
       m_deviceFeatures.ext4444Formats.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT;
       m_deviceFeatures.ext4444Formats.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.ext4444Formats);
@@ -799,7 +813,9 @@ namespace dxvk {
       "\n  vertexAttributeInstanceRateDivisor     : ", features.extVertexAttributeDivisor.vertexAttributeInstanceRateDivisor ? "1" : "0",
       "\n  vertexAttributeInstanceRateZeroDivisor : ", features.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor ? "1" : "0",
       "\n", VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-      "\n  bufferDeviceAddress                    : ", features.khrBufferDeviceAddress.bufferDeviceAddress));
+      "\n  bufferDeviceAddress                    : ", features.khrBufferDeviceAddress.bufferDeviceAddress,
+      "\nVulkan 1.1 multiview",
+      "\n  multiview                              : ", features.coreMultiview.multiview ? "1" : "0"));
   }
 
 

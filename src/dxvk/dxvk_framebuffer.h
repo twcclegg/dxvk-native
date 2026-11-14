@@ -40,6 +40,10 @@ namespace dxvk {
   struct DxvkRenderTargets {
     DxvkAttachment depth;
     DxvkAttachment color[MaxNumRenderTargets];
+    /// Apple port (stereo): multiview view mask for the render pass, 0 for an ordinary pass.
+    /// The client sets it only when the device has multiview enabled and every attachment view
+    /// has at least (highest set bit + 1) layers; view i then renders into layer i of each view.
+    uint32_t       viewMask = 0;
   };
 
 
@@ -85,6 +89,16 @@ namespace dxvk {
      */
     DxvkFramebufferSize size() const {
       return m_renderSize;
+    }
+
+    /**
+     * \brief Multiview view mask
+     * \returns The view mask of the render pass, 0 if not multiview.
+     *    Inside a multiview pass, the framebuffer has one layer and
+     *    clears (vkCmdClearAttachments) must use layer 0, count 1.
+     */
+    uint32_t viewMask() const {
+      return m_renderTargets.viewMask;
     }
     
     /**

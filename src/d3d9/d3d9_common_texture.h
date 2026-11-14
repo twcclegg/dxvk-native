@@ -442,6 +442,10 @@ namespace dxvk {
 
     bool                          m_shadow; //< Depth Compare-ness
 
+    /// Apple port (stereo): image layers per D3D9 layer; 2 for a multiview stereo target
+    /// (D3D9DeviceEx::GetStereoLayerCount). Only attachment views see the second layer.
+    uint32_t                      m_stereoLayers = 1;
+
     int64_t                       m_size = 0;
 
     bool                          m_systemmemModified = false;

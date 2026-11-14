@@ -37,6 +37,9 @@ namespace dxvk {
     m_mapMode = DetermineMapMode();
     m_shadow  = DetermineShadowState();
 
+    if (m_mapMode == D3D9_COMMON_TEXTURE_MAP_MODE_BACKED)
+      m_stereoLayers = pDevice->GetStereoLayerCount(&m_desc, ResourceType);
+
     if (m_mapMode == D3D9_COMMON_TEXTURE_MAP_MODE_BACKED) {
       bool plainSurface = m_type == D3DRTYPE_SURFACE &&
                           !(m_desc.Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL));
@@ -220,7 +223,7 @@ namespace dxvk {
     imageInfo.extent.width    = m_desc.Width;
     imageInfo.extent.height   = m_desc.Height;
     imageInfo.extent.depth    = m_desc.Depth;
-    imageInfo.numLayers       = m_desc.ArraySize;
+    imageInfo.numLayers       = m_desc.ArraySize * m_stereoLayers;
     imageInfo.mipLevels       = m_desc.MipLevels;
     imageInfo.usage           = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
                               | VK_IMAGE_USAGE_TRANSFER_DST_BIT
@@ -491,8 +494,18 @@ namespace dxvk {
       viewInfo.aspect &= ~VK_IMAGE_ASPECT_STENCIL_BIT;
 
     if (UsageFlags == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT ||
-        UsageFlags == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+        UsageFlags == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
       viewInfo.numLevels = 1;
+
+      // Apple port (stereo): attachment views of a two-layer stereo target cover both layers, so a
+      // multiview pass renders eye i into layer i (D3D9DeviceEx::BindFramebuffer picks the view mask).
+      // Sampling views keep layer 0 only: pixel shaders sample 2D textures (later chunk: per-view layers).
+      if (m_stereoLayers > 1) {
+        viewInfo.type      = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        viewInfo.minLayer  = 0;
+        viewInfo.numLayers = m_stereoLayers;
+      }
+    }
 
     // Remove swizzle on depth views.
     if (UsageFlags == VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
