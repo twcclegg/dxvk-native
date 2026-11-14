@@ -3640,9 +3640,13 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     uint32_t floatType = m_module.defFloatType(32);
     uint32_t vec4Type  = m_module.defVectorType(floatType, 4);
     
+    // Apple port experiment: true-stereo eye shift (DxsoStereoClipShiftEnabled in dxso_util.h).
+    const bool stereoShift = DxsoStereoClipShiftEnabled();
+
     // Declare uniform buffer containing clip planes
     uint32_t clipPlaneArray  = m_module.defArrayTypeUnique(vec4Type, clipPlaneCountId);
-    uint32_t clipPlaneStruct = m_module.defStructTypeUnique(1, &clipPlaneArray);
+    std::array<uint32_t, 2> clipPlaneMembers = {{ clipPlaneArray, vec4Type }};
+    uint32_t clipPlaneStruct = m_module.defStructTypeUnique(stereoShift ? 2 : 1, clipPlaneMembers.data());
     uint32_t clipPlaneBlock  = m_module.newVar(
       m_module.defPointerType(clipPlaneStruct, spv::StorageClassUniform),
       spv::StorageClassUniform);
@@ -3653,6 +3657,12 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     m_module.setDebugMemberName   (clipPlaneStruct, 0, "clip_planes");
     m_module.decorate             (clipPlaneStruct, spv::DecorationBlock);
     m_module.memberDecorateOffset (clipPlaneStruct, 0, 0);
+
+    if (stereoShift) {
+      // vec4 right after the clip planes: x = clip-space eye shift k, yzw unused.
+      m_module.setDebugMemberName   (clipPlaneStruct, 1, "stereo_shift");
+      m_module.memberDecorateOffset (clipPlaneStruct, 1, DxsoStereoClipShiftIndex * 16);
+    }
     
     uint32_t bindingId = computeResourceSlotId(
       m_programInfo.type(), DxsoBindingType::ConstantBuffer,
@@ -3692,6 +3702,45 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
     // Compute clip distances
     uint32_t positionId = m_module.opLoad(vec4Type, positionPtr);
+
+    if (stereoShift) {
+      /* True-stereo eye shift. Moving the eye by e along the camera's right axis (e < 0: left eye) gives
+       * view-space (x - e, y, z). In D3D's row-vector convention clip = (x, y, z, 1) * P, so the change is
+       *   dclip = (-e, 0, 0, 0) * P = -e * (P00, P01, P02, P03),
+       * and a perspective P (off-axis or not) has P01 = P02 = 0 (y, z and w don't depend on x) and P03 = 0
+       * (w = z). Hence clip.x' = clip.x - P00*e, with y, z, w unchanged: a constant offset in clip space
+       * before the divide, so the screen-space disparity P00*e/w falls off with depth as it should. The CPU passes k = P00*e (dxvk_stereo_set_clip_shift); k < 0 for the left
+       * eye moves clip.x up, i.e. objects move right on screen, as seen from a camera moved left.
+       *
+       * Orthographic passes (the sun's shadow cascades, full-screen post quads, UI) output w == 1 exactly
+       * and are left alone; so is the rare perspective vertex at exactly w == 1.
+       *
+       * The clip distances below keep using the unshifted position, so user clip planes (water reflection)
+       * cut the same world-space plane in both eyes. */
+      uint32_t boolType = m_module.defBoolType();
+      std::array<uint32_t, 2> shiftMembers = {{
+        m_module.constu32(1),
+        m_module.constu32(0),
+      }};
+      uint32_t shiftId = m_module.opLoad(floatType,
+        m_module.opAccessChain(
+          m_module.defPointerType(floatType, spv::StorageClassUniform),
+          clipPlaneBlock, 2, shiftMembers.data()));
+
+      const uint32_t xIndex = 0, wIndex = 3;
+      uint32_t posX = m_module.opCompositeExtract(floatType, positionId, 1, &xIndex);
+      uint32_t posW = m_module.opCompositeExtract(floatType, positionId, 1, &wIndex);
+
+      uint32_t perspective = m_module.opFOrdGreaterThan(boolType,
+        m_module.opFAbs(floatType, m_module.opFSub(floatType, posW, m_module.constf32(1.0f))),
+        m_module.constf32(1e-5f));
+
+      uint32_t shift = m_module.opSelect(floatType, perspective, shiftId, m_module.constf32(0.0f));
+      uint32_t shifted = m_module.opCompositeInsert(vec4Type,
+        m_module.opFSub(floatType, posX, shift), positionId, 1, &xIndex);
+
+      m_module.opStore(positionPtr, shifted);
+    }
     
     for (uint32_t i = 0; i < caps::MaxClipPlanes; i++) {
       std::array<uint32_t, 2> blockMembers = {{

@@ -825,6 +825,8 @@ namespace dxvk {
     void UploadConstants();
     
     void UpdateClipPlanes();
+
+    void UpdateStereoClipShift();
     
     template <uint32_t Offset, uint32_t Length>
     void UpdatePushConstant(const void* pData);
@@ -1230,6 +1232,7 @@ namespace dxvk {
     uint32_t                        m_lastProjectionBitfield = 0;
     uint32_t                        m_lastSamplerTypes = 0;
     uint32_t                        m_lastPointMode = 0;
+    float                           m_stereoClipShiftBound = 0.0f; // dxvk_stereo.h
     uint32_t                        m_lastFetch4    = 0;
     uint32_t                        m_lastHazardsDS = 0;
     uint32_t                        m_lastSamplerTypesFF = 0;

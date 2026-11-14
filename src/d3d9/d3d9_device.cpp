@@ -23,7 +23,13 @@
 
 #include "d3d9_initializer.h"
 
+#include "../dxso/dxso_util.h"
+#include "../util/util_env.h"
+
+#include "dxvk_stereo.h"
+
 #include <algorithm>
+#include <atomic>
 #include <cfloat>
 #ifdef MSC_VER
 #pragma fenv_access (on)
@@ -4842,9 +4848,11 @@ namespace dxvk {
                            DxsoProgramType::PixelShader,
                            DxsoConstantBuffers::PSConstantBuffer);
 
+    // One vec4 more than the clip planes: the stereo eye shift (dxvk_stereo.h), zero unless set.
+    static_assert(DxsoStereoClipShiftIndex == caps::MaxClipPlanes, "stereo shift follows the clip planes");
     m_vsClipPlanes =
       CreateConstantBuffer(false,
-                           caps::MaxClipPlanes * sizeof(D3D9ClipPlane),
+                           (caps::MaxClipPlanes + 1) * sizeof(D3D9ClipPlane),
                            DxsoProgramType::VertexShader,
                            DxsoConstantBuffers::VSClipPlanes);
 
@@ -4961,12 +4969,41 @@ namespace dxvk {
         : D3D9ClipPlane();
     }
 
+    dst[DxsoStereoClipShiftIndex] = D3D9ClipPlane{ { m_stereoClipShiftBound, 0.0f, 0.0f, 0.0f } };
+
     EmitCs([
       cBuffer = m_vsClipPlanes,
       cSlice  = slice
     ] (DxvkContext* ctx) {
       ctx->invalidateBuffer(cBuffer, cSlice);
     });
+  }
+
+
+  namespace {
+    std::atomic<float> g_stereoClipShift = { 0.0f };
+  }
+
+
+  void D3D9DeviceEx::UpdateStereoClipShift() {
+    float k = g_stereoClipShift.load(std::memory_order_relaxed);
+
+    // Only the main scene's passes: a viewport with the back buffer's aspect ratio. Spot/point light shadow
+    // maps and environment maps are square and stay as the centre eye rendered them.
+    static const bool allPasses = env::getEnvVar("LB_STEREO_PASSES") == "all";
+    if (k != 0.0f && !allPasses && m_implicitSwapchain != nullptr) {
+      const D3DPRESENT_PARAMETERS* pp = m_implicitSwapchain->GetPresentParams();
+      const D3DVIEWPORT9& vp = m_state.viewport;
+      const double a = double(vp.Width)  * double(pp->BackBufferHeight);
+      const double b = double(vp.Height) * double(pp->BackBufferWidth);
+      if (vp.Width == 0 || vp.Height == 0 || std::abs(a - b) > 0.01 * b)
+        k = 0.0f;
+    }
+
+    if (k != m_stereoClipShiftBound) {
+      m_stereoClipShiftBound = k;
+      m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
+    }
   }
 
 
@@ -6022,6 +6059,9 @@ namespace dxvk {
 
     if (m_flags.test(D3D9DeviceFlag::DirtyAlphaTestState))
       BindAlphaTestState();
+
+    if (unlikely(DxsoStereoClipShiftEnabled()))
+      UpdateStereoClipShift();
 
     if (m_flags.test(D3D9DeviceFlag::DirtyClipPlanes))
       UpdateClipPlanes();
@@ -7396,4 +7436,14 @@ namespace dxvk {
     return D3D_OK;
   }
 
+}
+
+
+extern "C" void dxvk_stereo_set_clip_shift(float k) {
+  dxvk::g_stereoClipShift.store(k, std::memory_order_relaxed);
+}
+
+
+extern "C" int dxvk_stereo_enabled(void) {
+  return dxvk::DxsoStereoClipShiftEnabled() ? 1 : 0;
 }
