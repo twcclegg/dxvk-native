@@ -23,6 +23,12 @@
  * Layer 0 is what D3D9 sees everywhere (sampling, StretchRect, GetRenderTargetData, Present); layer 1 leaves
  * the GPU only through dxvk_stereo_get_render_target_data_layer for now. It implies the shader code of
  * LB_STEREO_EYE_UNITS. Unset, nothing changes.
+ *
+ * LB_STEREO_DUP=<k> (timing experiment, twcclegg/skyrim-apple#23 stage 0): every draw k applies to is issued
+ * twice on the DXVK command thread, the copy with the negated offset, into the same render targets. k is the
+ * clip-space x shift used while no offset is set here (so =1 works in mono play). The swap chain's
+ * "dxvk: gpu busy" log line then ends in ", dup <N> draws per frame". Details in src/dxso/dxso_util.h.
+ * Mono only: ignored with LB_STEREO_MULTIVIEW=1, which already draws both eyes in one submission.
  */
 #ifndef DXVK_STEREO_H
 #define DXVK_STEREO_H
