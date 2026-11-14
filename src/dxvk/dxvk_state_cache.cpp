@@ -594,6 +594,20 @@ namespace dxvk {
         entry.format.color[i].layout = unpackImageLayout(imageLayout);
       }
 
+      // v11: multiview view mask (Apple port, stereo). Entries with a non-zero mask can only
+      // match vertex shaders compiled with multiview (LB_STEREO_MULTIVIEW, whose SPIR-V differs
+      // and so has different shader keys), so a mono session never compiles them.
+      entry.format.viewMask = 0;
+
+      if (version >= 11) {
+        uint8_t viewMask = 0;
+
+        if (!data.read(viewMask, version))
+          return false;
+
+        entry.format.viewMask = viewMask;
+      }
+
       if (!validateRenderPassFormat(entry.format))
         return false;
 
@@ -688,6 +702,8 @@ namespace dxvk {
         data.write(uint8_t(entry.format.color[i].format));
         data.write(packImageLayout(entry.format.color[i].layout));
       }
+
+      data.write(uint8_t(entry.format.viewMask));
 
       // Write out common pipeline state
       data.write(entry.gpState.bsBindingMask);
@@ -1036,7 +1052,8 @@ namespace dxvk {
 
   bool DxvkStateCache::validateRenderPassFormat(
     const DxvkRenderPassFormat&     format) {
-    bool valid = true;
+    // The render pass code supports up to 8 views (a uint8_t in the cache file).
+    bool valid = format.viewMask < 0x100;
 
     if (format.depth.format) {
       valid &= format.depth.layout == VK_IMAGE_LAYOUT_GENERAL

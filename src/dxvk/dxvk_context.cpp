@@ -621,7 +621,8 @@ namespace dxvk {
       clearRect.rect.extent.width   = imageView->mipLevelExtent(0).width;
       clearRect.rect.extent.height  = imageView->mipLevelExtent(0).height;
       clearRect.baseArrayLayer      = 0;
-      clearRect.layerCount          = imageView->info().numLayers;
+      // Inside a multiview pass one layer means every view (VUID-vkCmdClearAttachments-baseArrayLayer-00018)
+      clearRect.layerCount          = m_state.om.framebuffer->viewMask() ? 1 : imageView->info().numLayers;
 
       m_cmd->cmdClearAttachments(1, &clearInfo, 1, &clearRect);
     } else
@@ -3284,6 +3285,11 @@ namespace dxvk {
     clearRect.rect.extent.height  = extent.height;
     clearRect.baseArrayLayer      = 0;
     clearRect.layerCount          = imageView->info().numLayers;
+
+    // The bound framebuffer (not a temporary one): inside a multiview
+    // pass, layer 0 with a count of 1 clears every view.
+    if (attachmentIndex >= 0 && m_state.om.framebuffer->viewMask())
+      clearRect.layerCount        = 1;
 
     m_cmd->cmdClearAttachments(1, &clearInfo, 1, &clearRect);
 

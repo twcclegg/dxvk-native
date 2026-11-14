@@ -54,6 +54,10 @@ namespace dxvk {
     /// Workaround for games using alpha test == 1.0, etc due to wonky interpolation or
     /// misc. imprecision on some vendors
     bool alphaTestWiggleRoom;
+
+    /// Apple port (stereo): vertex shaders read a per-view eye offset at gl_ViewIndex
+    /// (LB_STEREO_MULTIVIEW and the device's multiview feature, dxso_util.h)
+    bool stereoMultiview = false;
   };
 
 }

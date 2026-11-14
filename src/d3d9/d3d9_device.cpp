@@ -843,6 +843,14 @@ namespace dxvk {
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::GetRenderTargetData(
           IDirect3DSurface9* pRenderTarget,
           IDirect3DSurface9* pDestSurface) {
+    return GetRenderTargetDataLayer(pRenderTarget, pDestSurface, 0);
+  }
+
+
+  HRESULT D3D9DeviceEx::GetRenderTargetDataLayer(
+          IDirect3DSurface9* pRenderTarget,
+          IDirect3DSurface9* pDestSurface,
+          UINT               Layer) {
     D3D9DeviceLock lock = LockDevice();
 
     D3D9Surface* src = static_cast<D3D9Surface*>(pRenderTarget);
@@ -852,13 +860,22 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     if (pRenderTarget == pDestSurface)
-      return D3D_OK;
+      return Layer == 0 ? D3D_OK : D3DERR_INVALIDCALL;
 
     D3D9CommonTexture* dstTexInfo = GetCommonTexture(dst);
     D3D9CommonTexture* srcTexInfo = GetCommonTexture(src);
 
     if (srcTexInfo->Desc()->Format != dstTexInfo->Desc()->Format)
       return D3DERR_INVALIDCALL;
+
+    // Apple port (stereo): layers beyond 0 exist only in two-layer multiview targets, and only the
+    // system-memory path below reads them (no layer-aware StretchRect yet).
+    if (Layer != 0) {
+      if (srcTexInfo->GetImage() == nullptr
+       || src->GetFace() + Layer >= srcTexInfo->GetImage()->info().numLayers
+       || dstTexInfo->Desc()->Pool == D3DPOOL_DEFAULT)
+        return D3DERR_INVALIDCALL;
+    }
 
     if (dstTexInfo->Desc()->Pool == D3DPOOL_DEFAULT)
       return this->StretchRect(pRenderTarget, nullptr, pDestSurface, nullptr, D3DTEXF_NONE);
@@ -872,7 +889,7 @@ namespace dxvk {
     VkImageSubresourceLayers srcSubresourceLayers = {
       srcSubresource.aspectMask,
       srcSubresource.mipLevel,
-      srcSubresource.arrayLayer, 1 };
+      srcSubresource.arrayLayer + Layer, 1 };
 
     VkExtent3D srcExtent = srcTexInfo->GetExtentMip(src->GetMipLevel());
 
@@ -3910,6 +3927,14 @@ namespace dxvk {
       enabled.extCustomBorderColor.customBorderColorWithoutFormat = VK_TRUE;
     }
 
+    // Apple port (stereo): single-pass stereo, only on request (dxso_util.h, DxsoStereoMultiviewRequested).
+    if (DxsoStereoMultiviewRequested()) {
+      enabled.coreMultiview.multiview = supported.coreMultiview.multiview;
+
+      if (!supported.coreMultiview.multiview)
+        Logger::err("D3D9: LB_STEREO_MULTIVIEW=1 but the Vulkan device has no multiview; rendering mono");
+    }
+
     return enabled;
   }
 
@@ -4853,9 +4878,10 @@ namespace dxvk {
 
     // One vec4 more than the clip planes: the stereo eye shift (dxvk_stereo.h), zero unless set.
     static_assert(DxsoStereoClipShiftIndex == caps::MaxClipPlanes, "stereo shift follows the clip planes");
+    // With multiview a second vec4 follows: view 1's shift (stereo_shift becomes vec4[2]).
     m_vsClipPlanes =
       CreateConstantBuffer(false,
-                           (caps::MaxClipPlanes + 1) * sizeof(D3D9ClipPlane),
+                           (caps::MaxClipPlanes + (IsStereoMultiview() ? DxsoStereoViewCount : 1)) * sizeof(D3D9ClipPlane),
                            DxsoProgramType::VertexShader,
                            DxsoConstantBuffers::VSClipPlanes);
 
@@ -4972,8 +4998,12 @@ namespace dxvk {
         : D3D9ClipPlane();
     }
 
-    dst[DxsoStereoClipShiftIndex] = D3D9ClipPlane{ { m_stereoClipShiftBound[0], m_stereoClipShiftBound[1],
-                                                       m_stereoClipShiftBound[2], m_stereoClipShiftBound[3] } };
+    const uint32_t stereoViews = IsStereoMultiview() ? DxsoStereoViewCount : 1;
+
+    for (uint32_t v = 0; v < stereoViews; v++) {
+      const std::array<float, 4>& k = m_stereoClipShiftBound[v];
+      dst[DxsoStereoClipShiftIndex + v] = D3D9ClipPlane{ { k[0], k[1], k[2], k[3] } };
+    }
 
     EmitCs([
       cBuffer = m_vsClipPlanes,
@@ -4985,16 +5015,44 @@ namespace dxvk {
 
 
   namespace {
-    // Set between frames by the runtime, read at draws on the CS-recording thread.
-    std::mutex           g_stereoMutex;
-    std::array<float, 4> g_stereoClipShift = {};
+    // Set between frames by the runtime, read at draws on the CS-recording thread. One offset per view:
+    // view 0 is the only one used outside multiview passes (dxvk_stereo.h).
+    std::mutex                          g_stereoMutex;
+    std::array<std::array<float, 4>, 2> g_stereoClipShift = {};
+  }
+
+
+  uint32_t D3D9DeviceEx::GetStereoLayerCount(const D3D9_COMMON_TEXTURE_DESC* pDesc, D3DRESOURCETYPE ResourceType) const {
+    // Narrow first policy for single-pass stereo: the main scene's colour and depth targets, recognised by
+    // the back buffer's exact size (not its aspect: half-size targets such as the 960x540 reflection pass
+    // must stay mono). The back buffer itself stays single-layer, so passes into it stay mono; eye 2 leaves
+    // a two-layer target only through dxvk_stereo_get_render_target_data_layer for now (later chunks: layer
+    // aware copies and presentation). Multisampled targets, cube maps, volumes and arrays are left alone.
+    if (likely(!IsStereoMultiview()) || m_implicitSwapchain == nullptr)
+      return 1;
+
+    if (pDesc->IsBackBuffer
+     || !(pDesc->Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
+     || (ResourceType != D3DRTYPE_SURFACE && ResourceType != D3DRTYPE_TEXTURE)
+     || pDesc->ArraySize != 1 || pDesc->Depth != 1
+     || pDesc->MultiSample != D3DMULTISAMPLE_NONE)
+      return 1;
+
+    const D3DPRESENT_PARAMETERS* pp = m_implicitSwapchain->GetPresentParams();
+
+    if (pDesc->Width != pp->BackBufferWidth || pDesc->Height != pp->BackBufferHeight)
+      return 1;
+
+    return DxsoStereoViewCount;
   }
 
 
   void D3D9DeviceEx::UpdateStereoClipShift() {
-    std::array<float, 4> k;
+    std::array<std::array<float, 4>, 2> k;
     { std::lock_guard<std::mutex> lock(g_stereoMutex); k = g_stereoClipShift; }
-    const bool any = k[0] != 0.0f || k[1] != 0.0f || k[2] != 0.0f || k[3] != 0.0f;
+    bool any = false;
+    for (const auto& v : k)
+      any |= v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f || v[3] != 0.0f;
 
     // Only the main scene's passes: by default a viewport with the back buffer's aspect ratio, so spot/point
     // light shadow maps and environment maps (square) stay as the centre eye rendered them. LB_STEREO_PASSES=size
@@ -5500,6 +5558,30 @@ namespace dxvk {
           m_state.depthStencil->GetDepthStencilView(),
           m_state.depthStencil->GetDepthStencilLayout(depthWrite, m_activeHazardsDS != 0) };
       }
+    }
+
+    // Apple port (stereo): one draw renders both eyes (view mask 0b11, view i into layer i) only when every
+    // bound attachment is a two-layer stereo target (GetStereoLayerCount). Any one-layer attachment, such as
+    // the back buffer, keeps the pass mono as before: it renders layer 0 of two-layer attachments, with view
+    // 0's eye offset.
+    if (unlikely(IsStereoMultiview())) {
+      uint32_t count = 0;
+      bool allStereo = true;
+
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+        if (attachments.color[i].view != nullptr) {
+          count += 1;
+          allStereo &= attachments.color[i].view->info().numLayers == DxsoStereoViewCount;
+        }
+      }
+
+      if (attachments.depth.view != nullptr) {
+        count += 1;
+        allStereo &= attachments.depth.view->info().numLayers == DxsoStereoViewCount;
+      }
+
+      if (count != 0 && allStereo)
+        attachments.viewMask = (1u << DxsoStereoViewCount) - 1;
     }
 
     // Create and bind the framebuffer object to the context
@@ -6076,7 +6158,7 @@ namespace dxvk {
     if (m_flags.test(D3D9DeviceFlag::DirtyAlphaTestState))
       BindAlphaTestState();
 
-    if (unlikely(DxsoStereoClipShiftEnabled()))
+    if (unlikely(DxsoStereoClipShiftEnabled() || IsStereoMultiview()))
       UpdateStereoClipShift();
 
     if (m_flags.test(D3D9DeviceFlag::DirtyClipPlanes))
@@ -7461,11 +7543,49 @@ extern "C" void dxvk_stereo_set_clip_shift(float k) {
 
 
 extern "C" void dxvk_stereo_set_clip_offset(float x, float y, float z, float w) {
+  // View 0 gets the offset (every mono pass, as before multiview); view 1 the mirrored eye.
   std::lock_guard<std::mutex> lock(dxvk::g_stereoMutex);
-  dxvk::g_stereoClipShift = {{ x, y, z, w }};
+  dxvk::g_stereoClipShift = {{ {{ x, y, z, w }}, {{ -x, -y, -z, -w }} }};
+}
+
+
+extern "C" void dxvk_stereo_set_view_clip_offsets(const float view0[4], const float view1[4]) {
+  std::lock_guard<std::mutex> lock(dxvk::g_stereoMutex);
+  dxvk::g_stereoClipShift = {{
+    {{ view0[0], view0[1], view0[2], view0[3] }},
+    {{ view1[0], view1[1], view1[2], view1[3] }} }};
 }
 
 
 extern "C" int dxvk_stereo_enabled(void) {
-  return dxvk::DxsoStereoClipShiftEnabled() ? 1 : 0;
+  return (dxvk::DxsoStereoClipShiftEnabled() || dxvk::DxsoStereoMultiviewRequested()) ? 1 : 0;
+}
+
+
+extern "C" int dxvk_stereo_multiview_enabled(void* device) {
+  if (device == nullptr)
+    return 0;
+  auto* d3d9 = static_cast<dxvk::D3D9DeviceEx*>(static_cast<IDirect3DDevice9Ex*>(
+    static_cast<IDirect3DDevice9*>(device)));
+  return d3d9->IsStereoMultiview() ? 1 : 0;
+}
+
+
+extern "C" int dxvk_stereo_surface_layers(void* surface) {
+  if (surface == nullptr)
+    return 0;
+  auto* s = static_cast<dxvk::D3D9Surface*>(static_cast<IDirect3DSurface9*>(surface));
+  const auto& image = s->GetCommonTexture()->GetImage();
+  return image != nullptr ? int(image->info().numLayers) : 0;
+}
+
+
+extern "C" long dxvk_stereo_get_render_target_data_layer(void* device, void* renderTarget, void* destSurface,
+    unsigned layer) {
+  if (device == nullptr)
+    return D3DERR_INVALIDCALL;
+  auto* d3d9 = static_cast<dxvk::D3D9DeviceEx*>(static_cast<IDirect3DDevice9Ex*>(
+    static_cast<IDirect3DDevice9*>(device)));
+  return d3d9->GetRenderTargetDataLayer(static_cast<IDirect3DSurface9*>(renderTarget),
+    static_cast<IDirect3DSurface9*>(destSurface), layer);
 }

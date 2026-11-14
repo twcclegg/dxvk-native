@@ -1,4 +1,5 @@
 #include "dxso_options.h"
+#include "dxso_util.h"
 
 #include "../d3d9/d3d9_device.h"
 
@@ -43,6 +44,8 @@ namespace dxvk {
     longMad = options.longMad;
 
     alphaTestWiggleRoom = options.alphaTestWiggleRoom;
+
+    stereoMultiview = DxsoStereoMultiviewRequested() && devFeatures.coreMultiview.multiview;
   }
 
 }

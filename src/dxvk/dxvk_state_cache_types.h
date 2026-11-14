@@ -52,7 +52,7 @@ namespace dxvk {
    */
   struct DxvkStateCacheHeader {
     char     magic[4]   = { 'D', 'X', 'V', 'K' };
-    uint32_t version    = 10;
+    uint32_t version    = 11; /* Apple port: v11 adds the render pass view mask (multiview) */
     uint32_t entrySize  = 0; /* no longer meaningful */
   };
 

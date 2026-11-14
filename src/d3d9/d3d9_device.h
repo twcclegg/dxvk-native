@@ -655,6 +655,16 @@ namespace dxvk {
       return m_dxvkDevice;
     }
 
+    /* Apple port (stereo): LB_STEREO_MULTIVIEW is set and the device has multiview enabled. */
+    bool IsStereoMultiview() const {
+      return m_dxsoOptions.stereoMultiview;
+    }
+
+    /* Apple port (stereo): number of image layers for a new texture or surface: 2 for a render target or
+     * depth-stencil surface with the implicit swap chain's back buffer size (not the back buffer itself)
+     * when IsStereoMultiview(), else 1. See D3D9CommonTexture::CreatePrimaryImage. */
+    uint32_t GetStereoLayerCount(const D3D9_COMMON_TEXTURE_DESC* pDesc, D3DRESOURCETYPE ResourceType) const;
+
     D3D9_VK_FORMAT_MAPPING LookupFormat(
       D3D9Format            Format) const;
 
@@ -827,6 +837,13 @@ namespace dxvk {
     void UpdateClipPlanes();
 
     void UpdateStereoClipShift();
+
+    /* Apple port (stereo): GetRenderTargetData from one layer of the render target's image (debug and tests,
+     * dxvk_stereo_get_render_target_data_layer). Layer 0 is exactly GetRenderTargetData. */
+    HRESULT GetRenderTargetDataLayer(
+            IDirect3DSurface9* pRenderTarget,
+            IDirect3DSurface9* pDestSurface,
+            UINT               Layer);
     
     template <uint32_t Offset, uint32_t Length>
     void UpdatePushConstant(const void* pData);
@@ -1232,7 +1249,8 @@ namespace dxvk {
     uint32_t                        m_lastProjectionBitfield = 0;
     uint32_t                        m_lastSamplerTypes = 0;
     uint32_t                        m_lastPointMode = 0;
-    std::array<float, 4>            m_stereoClipShiftBound = {}; // dxvk_stereo.h: clip-space offset xyzw
+    // dxvk_stereo.h: clip-space offset xyzw per view (view 1 is used only with multiview)
+    std::array<std::array<float, 4>, 2> m_stereoClipShiftBound = {};
     uint32_t                        m_lastFetch4    = 0;
     uint32_t                        m_lastHazardsDS = 0;
     uint32_t                        m_lastSamplerTypesFF = 0;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 #include "dxso_common.h"
 #include "dxso_decoder.h"
@@ -62,7 +63,27 @@ namespace dxvk {
     return enabled;
   }
 
-  /* vec4 index of the stereo shift within the clip-plane buffer: right after the clip planes (6). */
+  /* vec4 index of the stereo shift within the clip-plane buffer: right after the clip planes (6). With
+   * multiview (below) it becomes vec4[2]: index 6 for view 0, 7 for view 1. */
   constexpr uint32_t DxsoStereoClipShiftIndex = 6;
+
+  /* Apple port experiment: single-pass stereo with Vulkan multiview (include/native/dxvk_stereo.h).
+   * LB_STEREO_MULTIVIEW=1 at launch, read once per process. When the Vulkan device also supports multiview:
+   *   - the D3D9 device enables VkPhysicalDeviceMultiviewFeatures::multiview;
+   *   - render targets and depth-stencil surfaces with the back buffer's exact size get two image layers
+   *     (D3D9CommonTexture, IsStereoMultiviewTarget) and render passes whose attachments all have two layers
+   *     get view mask 0b11 (D3D9DeviceEx::BindFramebuffer);
+   *   - the vertex shader's stereo shift becomes vec4[2] indexed by gl_ViewIndex (0 in an ordinary pass).
+   * It implies the stereo shift code (DxsoStereoClipShiftEnabled's shader path), with or without
+   * LB_STEREO_EYE_UNITS. Unset: nothing changes. */
+  inline bool DxsoStereoMultiviewRequested() {
+    static const bool requested = [] {
+      const char* e = std::getenv("LB_STEREO_MULTIVIEW");
+      return e && std::strcmp(e, "1") == 0;
+    }();
+    return requested;
+  }
+
+  constexpr uint32_t DxsoStereoViewCount = 2;
 
 }

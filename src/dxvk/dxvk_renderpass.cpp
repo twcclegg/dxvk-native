@@ -6,7 +6,8 @@
 namespace dxvk {
   
   bool DxvkRenderPassFormat::eq(const DxvkRenderPassFormat& fmt) const {
-    bool eq = sampleCount == fmt.sampleCount;
+    bool eq = sampleCount == fmt.sampleCount
+           && viewMask    == fmt.viewMask;
     
     for (uint32_t i = 0; i < MaxNumRenderTargets && eq; i++) {
       eq &= color[i].format == fmt.color[i].format
@@ -31,6 +32,7 @@ namespace dxvk {
 
     state.add(uint32_t(depth.format));
     state.add(uint32_t(depth.layout));
+    state.add(viewMask);
     return state;
   }
   
@@ -191,12 +193,19 @@ namespace dxvk {
           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
           VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT |
           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)) {
+      // A self-dependency of a subpass with more than one view must be view-local
+      // (VUID-VkSubpassDependency-srcSubpass-00872): each view only waits on itself.
+      VkDependencyFlags selfFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+      if (m_format.viewMask & (m_format.viewMask - 1))
+        selfFlags |= VK_DEPENDENCY_VIEW_LOCAL_BIT;
+
       subpassDeps[subpassDepCount++] = { 0, 0,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         VK_ACCESS_SHADER_READ_BIT,
-        VK_DEPENDENCY_BY_REGION_BIT };
+        selfFlags };
     }
 
     if (ops.barrier.srcStages && ops.barrier.dstStages) {
@@ -208,9 +217,23 @@ namespace dxvk {
         ops.barrier.dstAccess, 0 };
     }
     
+    // Apple port (stereo): one subpass rendering every view in the mask, each view into the
+    // attachment layer of the same index. Chained for every ops variant of this format, so all
+    // handles returned by getHandle() stay compatible with the default one that the framebuffer
+    // and the pipelines were created against. No view offsets or correlation masks.
+    VkRenderPassMultiviewCreateInfo multiviewInfo;
+    multiviewInfo.sType                = VK_STRUCTURE_TYPE_RENDER_PASS_MULTIVIEW_CREATE_INFO;
+    multiviewInfo.pNext                = nullptr;
+    multiviewInfo.subpassCount         = 1;
+    multiviewInfo.pViewMasks           = &m_format.viewMask;
+    multiviewInfo.dependencyCount      = 0;
+    multiviewInfo.pViewOffsets         = nullptr;
+    multiviewInfo.correlationMaskCount = 0;
+    multiviewInfo.pCorrelationMasks    = nullptr;
+
     VkRenderPassCreateInfo info;
     info.sType                        = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    info.pNext                        = nullptr;
+    info.pNext                        = m_format.viewMask ? &multiviewInfo : nullptr;
     info.flags                        = 0;
     info.attachmentCount              = attachments.size();
     info.pAttachments                 = attachments.data();

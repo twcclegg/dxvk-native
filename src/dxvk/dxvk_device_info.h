@@ -37,6 +37,7 @@ namespace dxvk {
   struct DxvkDeviceFeatures {
     VkPhysicalDeviceFeatures2                                 core;
     VkPhysicalDeviceShaderDrawParametersFeatures              shaderDrawParameters;
+    VkPhysicalDeviceMultiviewFeatures                         coreMultiview;  // Vulkan 1.1 core (Apple port: stereo)
     VkPhysicalDevice4444FormatsFeaturesEXT                    ext4444Formats;
     VkPhysicalDeviceCustomBorderColorFeaturesEXT              extCustomBorderColor;
     VkPhysicalDeviceDepthClipEnableFeaturesEXT                extDepthClipEnable;
