@@ -95,6 +95,7 @@ namespace dxvk {
 
     DxvkPipelineManager*              m_pipeManager;
     DxvkRenderPassPool*               m_passManager;
+    bool                              m_multiview = false;  // Apple port: device has multiview enabled
 
     std::vector<DxvkStateCacheEntry>  m_entries;
     std::atomic<bool>                 m_stopThreads = { false };
