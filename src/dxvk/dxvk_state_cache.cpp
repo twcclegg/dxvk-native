@@ -154,7 +154,8 @@ namespace dxvk {
           DxvkPipelineManager*  pipeManager,
           DxvkRenderPassPool*   passManager)
   : m_pipeManager(pipeManager),
-    m_passManager(passManager) {
+    m_passManager(passManager),
+    m_multiview  (device->features().coreMultiview.multiview) {
     bool newFile = !readCacheFile();
 
     if (newFile) {
@@ -375,6 +376,11 @@ namespace dxvk {
       for (auto e = entries.first; e != entries.second; e++) {
         const auto& entry = m_entries[e->second];
 
+        // Written by a multiview session (LB_STEREO_MULTIVIEW): such a render pass is invalid
+        // without the multiview feature, and no framebuffer here would ever use it.
+        if (entry.format.viewMask && !m_multiview)
+          continue;
+
         auto rp = m_passManager->getRenderPass(entry.format);
         pipeline->compilePipeline(entry.gpState, rp);
       }
@@ -594,9 +600,9 @@ namespace dxvk {
         entry.format.color[i].layout = unpackImageLayout(imageLayout);
       }
 
-      // v11: multiview view mask (Apple port, stereo). Entries with a non-zero mask can only
-      // match vertex shaders compiled with multiview (LB_STEREO_MULTIVIEW, whose SPIR-V differs
-      // and so has different shader keys), so a mono session never compiles them.
+      // v11: multiview view mask (Apple port, stereo). Shader keys hash the D3D9 bytecode, not
+      // the SPIR-V, so a session without multiview also matches these entries; compilePipelines
+      // skips them there (a non-zero view mask needs the multiview feature).
       entry.format.viewMask = 0;
 
       if (version >= 11) {
