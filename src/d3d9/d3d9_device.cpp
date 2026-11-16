@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "d3d9_device.h"
 
 #include "d3d9_interface.h"
@@ -4606,6 +4607,18 @@ namespace dxvk {
 
         pResource->SetWrittenByGPU(false);
         pResource->GPUReadingRange().Clear();
+
+        // Apple port, LB_LOCK_STAGING=1: a buffer-mode resource that needed this wait once switches to staging
+        // uploads (Unlock copies the dirty range into a temporary buffer), so the mapping buffer is never read by
+        // the GPU again and later locks skip the wait. Without it, a plain lock of a WRITEONLY buffer that is idle
+        // still synchronises with the CS thread every time, just to find that out (Skyrim: ~13% of main-thread
+        // time in a boss fight on an M1). Same switch as the busy case above, made after the first wait.
+        static const bool s_lockStaging = [] {
+          const char* e = std::getenv("LB_LOCK_STAGING");
+          return e && *e && *e != '0';
+        }();
+        if (s_lockStaging && !directMapping && !readOnly)
+          pResource->EnableStagingBufferUploads();
       }
     }
 
