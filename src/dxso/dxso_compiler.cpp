@@ -3773,8 +3773,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       stereoMatrixType = m_module.defArrayTypeUnique(mat4Type, m_module.constu32(DxsoStereoViewCount));
       m_module.decorateArrayStride(stereoMatrixType, 64);
     }
-    std::array<uint32_t, 3> clipPlaneMembers = {{ clipPlaneArray, stereoShiftType, stereoMatrixType }};
-    uint32_t clipPlaneStruct = m_module.defStructTypeUnique(stereoMultiview ? 3 : stereoShift ? 2 : 1, clipPlaneMembers.data());
+    std::array<uint32_t, 4> clipPlaneMembers = {{ clipPlaneArray, stereoShiftType, stereoMatrixType, stereoShiftType }};
+    uint32_t clipPlaneStruct = m_module.defStructTypeUnique(stereoMultiview ? 4 : stereoShift ? 2 : 1, clipPlaneMembers.data());
     uint32_t clipPlaneBlock  = m_module.newVar(
       m_module.defPointerType(clipPlaneStruct, spv::StorageClassUniform),
       spv::StorageClassUniform);
@@ -3796,6 +3796,8 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_module.memberDecorateOffset (clipPlaneStruct, 2, DxsoStereoClipMatrixIndex * 16);
       m_module.memberDecorate       (clipPlaneStruct, 2, spv::DecorationColMajor);
       m_module.memberDecorateMatrixStride(clipPlaneStruct, 2, 16);
+      m_module.setDebugMemberName   (clipPlaneStruct, 3, "stereo_ui_shift");
+      m_module.memberDecorateOffset (clipPlaneStruct, 3, DxsoStereoUiShiftIndex * 16);
     }
     
     uint32_t bindingId = computeResourceSlotId(
@@ -3893,7 +3895,16 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       uint32_t bool4 = m_module.defVectorType(boolType, 4);
       std::array<uint32_t, 4> persp4 = {{ perspective, perspective, perspective, perspective }};
       uint32_t perspectiveVec = m_module.opCompositeConstruct(bool4, 4, persp4.data());
-      uint32_t shift = m_module.opSelect(vec4Type, perspectiveVec, shiftId, zero4);
+      uint32_t orthoShift = zero4;
+      if (stereoMultiview) {
+        // w == 1 vertices: the interface's offset while it is drawn (zero otherwise, so post quads stay put)
+        std::array<uint32_t, 2> uiMembers = {{ m_module.constu32(3), shiftMembers[1] }};
+        orthoShift = m_module.opLoad(vec4Type,
+          m_module.opAccessChain(
+            m_module.defPointerType(vec4Type, spv::StorageClassUniform),
+            clipPlaneBlock, 2, uiMembers.data()));
+      }
+      uint32_t shift = m_module.opSelect(vec4Type, perspectiveVec, shiftId, orthoShift);
       uint32_t transformed = positionId;
       if (stereoMultiview) {
         // Per-view clip matrix (identity unless set): any eye camera, exactly, for perspective vertices.
