@@ -1,3 +1,7 @@
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
 #include "../util/util_time.h"
 
 #include "dxvk_device.h"
@@ -60,6 +64,19 @@ namespace dxvk {
   }
 
 
+  /* Apple port, LB_PIPE_LOG=1: one stderr line per graphics pipeline compiled, with how long it took and whether
+   * a draw waited for it ("at draw", on the CS thread) or the state cache's workers compiled it ahead. Lines land
+   * between the frame-time lines of the frame they belong to, so hitches can be matched to compiles. */
+  static bool pipeLogEnabled() {
+    static const bool on = [] { const char* e = std::getenv("LB_PIPE_LOG"); return e && *e == '1'; }();
+    return on;
+  }
+
+  static double pipeNowMs() {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+
+
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
@@ -72,7 +89,10 @@ namespace dxvk {
       if (instance)
         return instance->pipeline();
       
+      const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
       instance = this->createInstance(state, renderPass);
+      if (pipeLogEnabled())
+        std::fprintf(stderr, "pipe compiled at draw: %.1f ms\n", pipeNowMs() - t0);
     }
     
     if (!instance)
@@ -88,8 +108,12 @@ namespace dxvk {
     const DxvkRenderPass*                renderPass) {
     std::lock_guard<sync::Spinlock> lock(m_mutex);
 
-    if (!this->findInstance(state, renderPass))
+    if (!this->findInstance(state, renderPass)) {
+      const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
       this->createInstance(state, renderPass);
+      if (pipeLogEnabled())
+        std::fprintf(stderr, "pipe compiled ahead: %.1f ms\n", pipeNowMs() - t0);
+    }
   }
 
 
