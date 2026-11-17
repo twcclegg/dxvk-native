@@ -7687,6 +7687,73 @@ extern "C" int dxvk_stereo_surface_layers(void* surface) {
 }
 
 
+namespace dxvk {
+  HRESULT D3D9DeviceEx::CopyDepthToFloat(
+          IDirect3DSurface9* pDepthStencil,
+          IDirect3DSurface9* pFloatTarget) {
+    D3D9DeviceLock lock = LockDevice();
+    auto* src = static_cast<D3D9Surface*>(pDepthStencil);
+    auto* dst = static_cast<D3D9Surface*>(pFloatTarget);
+    if (src == nullptr || dst == nullptr)
+      return D3DERR_INVALIDCALL;
+    D3D9CommonTexture* srcTex = src->GetCommonTexture();
+    D3D9CommonTexture* dstTex = dst->GetCommonTexture();
+    if (srcTex == nullptr || dstTex == nullptr)
+      return D3DERR_INVALIDCALL;
+    Rc<DxvkImage> srcImage = srcTex->GetImage();
+    Rc<DxvkImage> dstImage = dstTex->GetImage();
+    if (srcImage == nullptr || dstImage == nullptr)
+      return D3DERR_INVALIDCALL;
+    const DxvkImageCreateInfo& si = srcImage->info();
+    const DxvkImageCreateInfo& di = dstImage->info();
+    const auto* srcFormat = imageFormatInfo(si.format);
+    // A 32-bit float depth aspect (D24 formats are D32_SFLOAT(_S8) here) into an R32_SFLOAT target of the same size.
+    if (!(srcFormat->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+     || (si.format != VK_FORMAT_D32_SFLOAT && si.format != VK_FORMAT_D32_SFLOAT_S8_UINT)
+     || di.format != VK_FORMAT_R32_SFLOAT
+     || si.sampleCount != VK_SAMPLE_COUNT_1_BIT || di.sampleCount != VK_SAMPLE_COUNT_1_BIT
+     || si.extent.width != di.extent.width || si.extent.height != di.extent.height)
+      return D3DERR_INVALIDCALL;
+
+    const uint32_t layers = std::min(si.numLayers, di.numLayers);
+    const VkDeviceSize size = VkDeviceSize(si.extent.width) * si.extent.height * 4 * layers;
+    if (m_depthCopyBuffer == nullptr || m_depthCopyBuffer->info().size < size) {
+      DxvkBufferCreateInfo info;
+      info.size   = size;
+      info.usage  = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+      info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      info.access = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+      m_depthCopyBuffer = m_dxvkDevice->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    }
+
+    EmitCs([
+      cSrc    = srcImage,
+      cDst    = dstImage,
+      cBuffer = m_depthCopyBuffer,
+      cLayers = layers,
+      cExtent = VkExtent3D { si.extent.width, si.extent.height, 1u }
+    ] (DxvkContext* ctx) {
+      ctx->copyImageToBuffer(cBuffer, 0, 0, 0, cSrc,
+        VkImageSubresourceLayers { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 }, cExtent);
+      ctx->copyBufferToImage(cDst,
+        VkImageSubresourceLayers { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 }, cExtent,
+        cBuffer, 0, 0, 0);
+    });
+    dstTex->MarkAllWrittenByGPU();
+    return D3D_OK;
+  }
+}
+
+
+extern "C" long dxvk_copy_depth_to_float(void* device, void* depthStencil, void* floatTarget) {
+  if (device == nullptr)
+    return D3DERR_INVALIDCALL;
+  auto* d3d9 = static_cast<dxvk::D3D9DeviceEx*>(static_cast<IDirect3DDevice9Ex*>(
+    static_cast<IDirect3DDevice9*>(device)));
+  return d3d9->CopyDepthToFloat(static_cast<IDirect3DSurface9*>(depthStencil), static_cast<IDirect3DSurface9*>(floatTarget));
+}
+
+
 extern "C" long dxvk_stereo_get_render_target_data_layer(void* device, void* renderTarget, void* destSurface,
     unsigned layer) {
   if (device == nullptr)

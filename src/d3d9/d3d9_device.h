@@ -852,6 +852,14 @@ namespace dxvk {
             IDirect3DSurface9* pRenderTarget,
             IDirect3DSurface9* pDestSurface,
             UINT               Layer);
+
+    /* Apple port: the depth of a depth-stencil surface copied into a single-channel float render target of the
+     * same size, every layer both have (dxvk_copy_depth_to_float). */
+    HRESULT CopyDepthToFloat(
+            IDirect3DSurface9* pDepthStencil,
+            IDirect3DSurface9* pFloatTarget);
+
+    Rc<DxvkBuffer> m_depthCopyBuffer;
     
     template <uint32_t Offset, uint32_t Length>
     void UpdatePushConstant(const void* pData);
