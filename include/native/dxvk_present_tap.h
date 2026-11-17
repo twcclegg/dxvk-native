@@ -50,6 +50,10 @@ typedef struct dxvk_present_tap_frame {
     uint32_t depth_width;
     uint32_t depth_height;
     uint32_t depth_vk_format;
+    /* Image layers: 1, or 2 for a stereo back buffer (LB_STEREO_PRESENT; eye i in layer i). The depth image has
+     * depth_layers (0 when there is none). Appended last, so older consumers that ignore them see layer 0. */
+    uint32_t layers;
+    uint32_t depth_layers;
 } dxvk_present_tap_frame;
 
 typedef void (*dxvk_present_tap_fn)(void *user, const dxvk_present_tap_frame *frame);

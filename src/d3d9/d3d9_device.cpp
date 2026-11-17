@@ -5043,10 +5043,18 @@ namespace dxvk {
     // must stay mono). The back buffer itself stays single-layer, so passes into it stay mono; eye 2 leaves
     // a two-layer target only through dxvk_stereo_get_render_target_data_layer for now (later chunks: layer
     // aware copies and presentation). Multisampled targets, cube maps, volumes and arrays are left alone.
-    if (likely(!IsStereoMultiview()) || m_implicitSwapchain == nullptr)
+    if (likely(!IsStereoMultiview()))
       return 1;
 
-    if (pDesc->IsBackBuffer
+    // LB_STEREO_PRESENT=1 (3.8): the back buffer has two layers too, so the game's final composite and interface
+    // render both eyes and the present tap hands both on. Presentation to a window still shows layer 0 (the
+    // swap chain's blit reads the back buffer's single-layer view).
+    if (pDesc->IsBackBuffer) {
+      static const bool stereoPresent = env::getEnvVar("LB_STEREO_PRESENT") == "1";
+      return stereoPresent && pDesc->MultiSample == D3DMULTISAMPLE_NONE ? DxsoStereoViewCount : 1;
+    }
+
+    if (m_implicitSwapchain == nullptr
      || !(pDesc->Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
      || (ResourceType != D3DRTYPE_SURFACE && ResourceType != D3DRTYPE_TEXTURE)
      || pDesc->ArraySize != 1 || pDesc->Depth != 1
