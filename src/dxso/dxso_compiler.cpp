@@ -3766,8 +3766,15 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_module.decorateArrayStride(stereoShiftType, 16);
     }
 
-    std::array<uint32_t, 2> clipPlaneMembers = {{ clipPlaneArray, stereoShiftType }};
-    uint32_t clipPlaneStruct = m_module.defStructTypeUnique(stereoShift ? 2 : 1, clipPlaneMembers.data());
+    // Multiview: also one clip-space matrix per view (mat4[2], column-major), clip' = M[view] * clip.
+    uint32_t mat4Type = m_module.defMatrixType(vec4Type, 4);
+    uint32_t stereoMatrixType = 0;
+    if (stereoMultiview) {
+      stereoMatrixType = m_module.defArrayTypeUnique(mat4Type, m_module.constu32(DxsoStereoViewCount));
+      m_module.decorateArrayStride(stereoMatrixType, 64);
+    }
+    std::array<uint32_t, 3> clipPlaneMembers = {{ clipPlaneArray, stereoShiftType, stereoMatrixType }};
+    uint32_t clipPlaneStruct = m_module.defStructTypeUnique(stereoMultiview ? 3 : stereoShift ? 2 : 1, clipPlaneMembers.data());
     uint32_t clipPlaneBlock  = m_module.newVar(
       m_module.defPointerType(clipPlaneStruct, spv::StorageClassUniform),
       spv::StorageClassUniform);
@@ -3783,6 +3790,12 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       // vec4 right after the clip planes: the clip-space eye offset (x alone for a sideways eye).
       m_module.setDebugMemberName   (clipPlaneStruct, 1, "stereo_shift");
       m_module.memberDecorateOffset (clipPlaneStruct, 1, DxsoStereoClipShiftIndex * 16);
+    }
+    if (stereoMultiview) {
+      m_module.setDebugMemberName   (clipPlaneStruct, 2, "stereo_matrix");
+      m_module.memberDecorateOffset (clipPlaneStruct, 2, DxsoStereoClipMatrixIndex * 16);
+      m_module.memberDecorate       (clipPlaneStruct, 2, spv::DecorationColMajor);
+      m_module.memberDecorateMatrixStride(clipPlaneStruct, 2, 16);
     }
     
     uint32_t bindingId = computeResourceSlotId(
@@ -3881,7 +3894,18 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       std::array<uint32_t, 4> persp4 = {{ perspective, perspective, perspective, perspective }};
       uint32_t perspectiveVec = m_module.opCompositeConstruct(bool4, 4, persp4.data());
       uint32_t shift = m_module.opSelect(vec4Type, perspectiveVec, shiftId, zero4);
-      uint32_t shifted = m_module.opFSub(vec4Type, positionId, shift);
+      uint32_t transformed = positionId;
+      if (stereoMultiview) {
+        // Per-view clip matrix (identity unless set): any eye camera, exactly, for perspective vertices.
+        std::array<uint32_t, 2> matrixMembers = {{ m_module.constu32(2), shiftMembers[1] }};
+        uint32_t matrixId = m_module.opLoad(mat4Type,
+          m_module.opAccessChain(
+            m_module.defPointerType(mat4Type, spv::StorageClassUniform),
+            clipPlaneBlock, 2, matrixMembers.data()));
+        uint32_t viewPos = m_module.opMatrixTimesVector(vec4Type, matrixId, positionId);
+        transformed = m_module.opSelect(vec4Type, perspectiveVec, viewPos, positionId);
+      }
+      uint32_t shifted = m_module.opFSub(vec4Type, transformed, shift);
 
       m_module.opStore(positionPtr, shifted);
     }

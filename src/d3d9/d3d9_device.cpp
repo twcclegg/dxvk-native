@@ -4883,7 +4883,7 @@ namespace dxvk {
     // With multiview a second vec4 follows: view 1's shift (stereo_shift becomes vec4[2]).
     m_vsClipPlanes =
       CreateConstantBuffer(false,
-                           (caps::MaxClipPlanes + (IsStereoMultiview() ? DxsoStereoViewCount : 1)) * sizeof(D3D9ClipPlane),
+                           (caps::MaxClipPlanes + (IsStereoMultiview() ? DxsoStereoViewCount * 5 : 1)) * sizeof(D3D9ClipPlane),
                            DxsoProgramType::VertexShader,
                            DxsoConstantBuffers::VSClipPlanes);
 
@@ -5007,6 +5007,14 @@ namespace dxvk {
       dst[DxsoStereoClipShiftIndex + v] = D3D9ClipPlane{ { k[0], k[1], k[2], k[3] } };
     }
 
+    if (IsStereoMultiview()) {
+      for (uint32_t v = 0; v < DxsoStereoViewCount; v++)
+        for (uint32_t c = 0; c < 4; c++) {
+          const float* m = &m_stereoClipMatrixBound[v][c * 4];
+          dst[DxsoStereoClipMatrixIndex + v * 4 + c] = D3D9ClipPlane{ { m[0], m[1], m[2], m[3] } };
+        }
+    }
+
     EmitCs([
       cBuffer = m_vsClipPlanes,
       cSlice  = slice
@@ -5021,6 +5029,9 @@ namespace dxvk {
     // view 0 is the only one used outside multiview passes (dxvk_stereo.h).
     std::mutex                          g_stereoMutex;
     std::array<std::array<float, 4>, 2> g_stereoClipShift = {};
+    // Per-view clip-space matrices, column-major (clip' = M * clip): identity unless set.
+    std::array<std::array<float, 16>, 2> g_stereoClipMatrix = {{
+      {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }}, {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }} }};
   }
 
 
@@ -5056,9 +5067,12 @@ namespace dxvk {
 
 
   void D3D9DeviceEx::UpdateStereoClipShift() {
+    static const std::array<std::array<float, 16>, 2> identity = {{
+      {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }}, {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }} }};
     std::array<std::array<float, 4>, 2> k;
-    { std::lock_guard<std::mutex> lock(g_stereoMutex); k = g_stereoClipShift; }
-    bool any = false;
+    std::array<std::array<float, 16>, 2> m;
+    { std::lock_guard<std::mutex> lock(g_stereoMutex); k = g_stereoClipShift; m = g_stereoClipMatrix; }
+    bool any = m != identity;
     for (const auto& v : k)
       any |= v[0] != 0.0f || v[1] != 0.0f || v[2] != 0.0f || v[3] != 0.0f;
 
@@ -5078,12 +5092,15 @@ namespace dxvk {
         const double b = double(vp.Height) * double(pp->BackBufferWidth);
         main = vp.Width != 0 && vp.Height != 0 && std::abs(a - b) <= 0.01 * b;
       }
-      if (!main)
+      if (!main) {
         k = {};
+        m = identity;
+      }
     }
 
-    if (k != m_stereoClipShiftBound) {
+    if (k != m_stereoClipShiftBound || m != m_stereoClipMatrixBound) {
       m_stereoClipShiftBound = k;
+      m_stereoClipMatrixBound = m;
       m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
     }
   }
@@ -7614,6 +7631,15 @@ extern "C" void dxvk_stereo_set_view_clip_offsets(const float view0[4], const fl
   dxvk::g_stereoClipShift = {{
     {{ view0[0], view0[1], view0[2], view0[3] }},
     {{ view1[0], view1[1], view1[2], view1[3] }} }};
+}
+
+
+extern "C" void dxvk_stereo_set_view_clip_matrices(const float view0[16], const float view1[16]) {
+  std::lock_guard<std::mutex> lock(dxvk::g_stereoMutex);
+  for (uint32_t i = 0; i < 16; i++) {
+    dxvk::g_stereoClipMatrix[0][i] = view0[i];
+    dxvk::g_stereoClipMatrix[1][i] = view1[i];
+  }
 }
 
 
