@@ -101,6 +101,11 @@ namespace dxvk {
   struct DxsoSamplerInfo {
     uint32_t dimensions = 0;
 
+    // Apple port (stereo): a pixel shader's 2D colour sampler is a 2D array under LB_STEREO_MULTIVIEW, read at
+    // layer gl_ViewIndex when the bound texture is a two-layer stereo target, else at layer 0 (emitStereoCoords).
+    bool arrayed = false;
+    uint32_t samplerIdx = 0;
+
     uint32_t varId = 0;
     uint32_t typeId = 0;
 
@@ -167,6 +172,7 @@ namespace dxvk {
     // Misc Types
     DxsoRegisterPointer vPos;
     DxsoRegisterPointer vFace;
+    uint32_t            viewIndexVar = 0;  // stereo: gl_ViewIndex, declared on first use
 
     ///////////////////
     // Colour Outputs
@@ -643,6 +649,17 @@ namespace dxvk {
     void emitTextureSample(const DxsoInstructionContext& ctx);
     void emitTextureKill(const DxsoInstructionContext& ctx);
     void emitTextureDepth(const DxsoInstructionContext& ctx);
+
+    /* Apple port (stereo): coordinates for an arrayed 2D sampler: (x, y) divided by the projection w when
+     * `projected`, then the layer as the third component. Returns the vec3 coordinate value. */
+    DxsoRegisterValue emitStereoCoords(
+      const DxsoSamplerInfo&        samplerInfo,
+            DxsoRegisterValue       coordinates,
+            bool                    projected);
+
+    /* The layer an arrayed sampler reads: gl_ViewIndex when bit 16 + slot of s_depth_filter is set (a two-layer
+     * stereo texture is bound), else 0. */
+    uint32_t emitStereoLayer(uint32_t samplerIdx);
 
     uint32_t emitSample(
             bool                    projected,
