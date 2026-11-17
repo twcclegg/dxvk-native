@@ -105,6 +105,10 @@ namespace dxvk {
     VkEvent                resetEvent = VK_NULL_HANDLE;
     VkQueryPool            queryPool  = VK_NULL_HANDLE;
     uint32_t               queryId    = 0;
+    // Apple port (stereo): consecutive pool slots this handle owns (2 on a multiview device, as a query
+    // inside a multiview render pass uses one slot per view), and how many the GPU writes for this use
+    uint32_t               slots      = 1;
+    uint32_t               viewCount  = 1;
   };
 
 
@@ -279,6 +283,7 @@ namespace dxvk {
     Rc<vk::DeviceFn>  m_vkd;
     VkQueryType       m_queryType;
     uint32_t          m_queryPoolSize;
+    uint32_t          m_slots;
     
     dxvk::mutex                     m_mutex;
     std::vector<DxvkGpuQueryHandle> m_handles;
@@ -378,6 +383,17 @@ namespace dxvk {
      * \param [in] cmd Command list
      * \param [in] type Query type
      */
+    /**
+     * \brief Sets the number of views of the current render pass
+     *
+     * Queries begun (and timestamps written) while a multiview render
+     * pass with this many views is active use that many query slots.
+     * \param [in] viewCount Views (1 outside multiview passes)
+     */
+    void setViewCount(uint32_t viewCount) {
+      m_viewCount = viewCount ? viewCount : 1;
+    }
+
     void beginQueries(
       const Rc<DxvkCommandList>&  cmd,
             VkQueryType           type);
@@ -398,6 +414,7 @@ namespace dxvk {
 
     DxvkGpuQueryPool*             m_pool;
     uint32_t                      m_activeTypes;
+    uint32_t                      m_viewCount = 1;
     std::vector<Rc<DxvkGpuQuery>> m_activeQueries;
 
     void beginSingleQuery(

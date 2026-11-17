@@ -4079,7 +4079,8 @@ namespace dxvk {
         m_state.om.renderTargets,
         m_state.om.renderPassOps);
       
-      // Begin occlusion queries
+      // Begin occlusion queries; inside a multiview pass each uses one slot per view
+      m_queryManager.setViewCount(bit::popcnt(m_state.om.framebuffer->viewMask()));
       m_queryManager.beginQueries(m_cmd, VK_QUERY_TYPE_OCCLUSION);
       m_queryManager.beginQueries(m_cmd, VK_QUERY_TYPE_PIPELINE_STATISTICS);
     }
@@ -4094,6 +4095,7 @@ namespace dxvk {
       
       m_queryManager.endQueries(m_cmd, VK_QUERY_TYPE_OCCLUSION);
       m_queryManager.endQueries(m_cmd, VK_QUERY_TYPE_PIPELINE_STATISTICS);
+      m_queryManager.setViewCount(1);
       
       this->renderPassUnbindFramebuffer();
 

@@ -103,16 +103,53 @@ namespace dxvk {
         return DxvkGpuQueryStatus::Failed;
     }
     
-    // Try to copy query data to temporary structure
+    // Try to copy query data to temporary structure. Inside a multiview render pass the query
+    // used one slot per view (Vulkan spec, "Multiview"); only their sum is defined, so the views
+    // are added up and averaged below, giving a result on the scale of a single view.
+    DxvkQueryData viewData[2];
+    uint32_t viewCount = std::min<uint32_t>(std::max<uint32_t>(handle.viewCount, 1u), 2u);
+
     result = m_vkd->vkGetQueryPoolResults(m_vkd->device(),
-      handle.queryPool, handle.queryId, 1,
-      sizeof(DxvkQueryData), &tmpData,
+      handle.queryPool, handle.queryId, viewCount,
+      sizeof(viewData), viewData,
       sizeof(DxvkQueryData), VK_QUERY_RESULT_64_BIT);
     
     if (result == VK_NOT_READY)
       return DxvkGpuQueryStatus::Pending;
     else if (result != VK_SUCCESS)
       return DxvkGpuQueryStatus::Failed;
+
+    tmpData = viewData[0];
+
+    if (viewCount > 1) {
+      // Rounded up, so a non-zero total never averages to zero
+      auto avg = [viewCount] (uint64_t a, uint64_t b) { return (a + b + viewCount - 1) / viewCount; };
+
+      switch (m_type) {
+        case VK_QUERY_TYPE_OCCLUSION:
+          tmpData.occlusion.samplesPassed = avg(viewData[0].occlusion.samplesPassed, viewData[1].occlusion.samplesPassed);
+          break;
+
+        case VK_QUERY_TYPE_PIPELINE_STATISTICS: {
+          auto& a = tmpData.statistic;
+          const auto& b = viewData[1].statistic;
+          a.iaVertices      = avg(a.iaVertices,      b.iaVertices);
+          a.iaPrimitives    = avg(a.iaPrimitives,    b.iaPrimitives);
+          a.vsInvocations   = avg(a.vsInvocations,   b.vsInvocations);
+          a.gsInvocations   = avg(a.gsInvocations,   b.gsInvocations);
+          a.gsPrimitives    = avg(a.gsPrimitives,    b.gsPrimitives);
+          a.clipInvocations = avg(a.clipInvocations, b.clipInvocations);
+          a.clipPrimitives  = avg(a.clipPrimitives,  b.clipPrimitives);
+          a.fsInvocations   = avg(a.fsInvocations,   b.fsInvocations);
+          a.tcsPatches      = avg(a.tcsPatches,      b.tcsPatches);
+          a.tesInvocations  = avg(a.tesInvocations,  b.tesInvocations);
+          a.csInvocations   = avg(a.csInvocations,   b.csInvocations);
+        } break;
+
+        default:  // timestamps: the first view's; transform feedback is not used with multiview
+          break;
+      }
+    }
     
     // Add numbers to the destination structure
     switch (m_type) {
@@ -161,7 +198,9 @@ namespace dxvk {
   : m_device        (device),
     m_vkd           (device->vkd()),
     m_queryType     (queryType),
-    m_queryPoolSize (queryPoolSize) {
+    m_queryPoolSize (queryPoolSize),
+    m_slots         (device->features().coreMultiview.multiview
+                  && queryType != VK_QUERY_TYPE_TRANSFORM_FEEDBACK_STREAM_EXT ? 2 : 1) {
 
   }
 
@@ -206,7 +245,7 @@ namespace dxvk {
     info.pNext      = nullptr;
     info.flags      = 0;
     info.queryType  = m_queryType;
-    info.queryCount = m_queryPoolSize;
+    info.queryCount = m_queryPoolSize * m_slots;
     info.pipelineStatistics = 0;
 
     if (m_queryType == VK_QUERY_TYPE_PIPELINE_STATISTICS) {
@@ -247,7 +286,7 @@ namespace dxvk {
         return;
       }
 
-      m_handles.push_back({ this, event, queryPool, i });
+      m_handles.push_back({ this, event, queryPool, i * m_slots, m_slots, 1 });
     }
   }
 
@@ -332,6 +371,7 @@ namespace dxvk {
     const Rc<DxvkCommandList>&  cmd,
     const Rc<DxvkGpuQuery>&     query) {
     DxvkGpuQueryHandle handle = m_pool->allocQuery(query->type());
+    handle.viewCount = std::min(m_viewCount, handle.slots);
     
     query->begin(cmd);
     query->addQueryHandle(handle);
@@ -340,7 +380,8 @@ namespace dxvk {
     cmd->cmdResetQuery(
       handle.queryPool,
       handle.queryId,
-      handle.resetEvent);
+      handle.resetEvent,
+      handle.slots);
     
     cmd->cmdWriteTimestamp(
       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
@@ -379,11 +420,13 @@ namespace dxvk {
     const Rc<DxvkCommandList>&  cmd,
     const Rc<DxvkGpuQuery>&     query) {
     DxvkGpuQueryHandle handle = m_pool->allocQuery(query->type());
+    handle.viewCount = std::min(m_viewCount, handle.slots);
     
     cmd->cmdResetQuery(
       handle.queryPool,
       handle.queryId,
-      handle.resetEvent);
+      handle.resetEvent,
+      handle.slots);
     
     if (query->isIndexed()) {
       cmd->cmdBeginQueryIndexed(
