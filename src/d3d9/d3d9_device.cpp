@@ -3457,6 +3457,8 @@ namespace dxvk {
           HWND hDestWindowOverride,
     const RGNDATA* pDirtyRegion,
           DWORD dwFlags) {
+    if (unlikely(StereoAudit() && IsStereoMultiview()))
+      StereoAuditPresent();
     return m_implicitSwapchain->Present(
       pSourceRect,
       pDestRect,
@@ -5053,7 +5055,13 @@ namespace dxvk {
 
     const D3DPRESENT_PARAMETERS* pp = m_implicitSwapchain->GetPresentParams();
 
-    if (pDesc->Width != pp->BackBufferWidth || pDesc->Height != pp->BackBufferHeight)
+    // A depth-stencil may be larger than the back buffer and still serve the main scene (Skyrim draws its
+    // 1280x720 scene and R32F depth targets with a 1280x1024 depth-stencil): at least its size in both
+    // dimensions is enough. Colour targets keep the exact-size rule (half-size ones must stay mono).
+    const bool depth = (pDesc->Usage & D3DUSAGE_DEPTHSTENCIL) != 0;
+
+    if (depth ? (pDesc->Width < pp->BackBufferWidth || pDesc->Height < pp->BackBufferHeight)
+              : (pDesc->Width != pp->BackBufferWidth || pDesc->Height != pp->BackBufferHeight))
       return 1;
 
     return DxsoStereoViewCount;
@@ -5595,6 +5603,20 @@ namespace dxvk {
 
       if (count != 0 && allStereo)
         attachments.viewMask = (1u << DxsoStereoViewCount) - 1;
+
+      if (unlikely(StereoAudit())) {
+        // LB_STEREO_MV_AUDIT: a key for the pass about to be drawn, its draws counted in PrepareDraw
+        std::string key = attachments.viewMask ? "mask 3 " : "mask 0 ";
+        auto add = [&key] (const char* name, const Rc<DxvkImageView>& view) {
+          const auto& ii = view->image()->info();
+          key += str::format(name, " ", ii.extent.width, "x", ii.extent.height, " fmt ", uint32_t(ii.format),
+            " layers ", view->info().numLayers, " ");
+        };
+        for (uint32_t i = 0; i < MaxNumRenderTargets; i++)
+          if (attachments.color[i].view != nullptr) add(str::format("rt", i).c_str(), attachments.color[i].view);
+        if (attachments.depth.view != nullptr) add("ds", attachments.depth.view);
+        m_stereoAuditKey = std::move(key);
+      }
     }
 
     // Create and bind the framebuffer object to the context
@@ -6095,7 +6117,27 @@ namespace dxvk {
   }
 
 
+  bool D3D9DeviceEx::StereoAudit() {
+    static const bool audit = env::getEnvVar("LB_STEREO_MV_AUDIT") == "1";
+    return audit;
+  }
+
+
+  void D3D9DeviceEx::StereoAuditPresent() {
+    // Once a second: draws per pass signature since the last line, then start over.
+    if (++m_stereoAuditFrames < 60)
+      return;
+    std::fprintf(stderr, "mvaudit: %u frames\n", m_stereoAuditFrames);
+    for (const auto& e : m_stereoAuditDraws)
+      std::fprintf(stderr, "mvaudit: %8.1f draws/frame  %s\n", double(e.second) / m_stereoAuditFrames, e.first.c_str());
+    m_stereoAuditDraws.clear();
+    m_stereoAuditFrames = 0;
+  }
+
+
   void D3D9DeviceEx::PrepareDraw(D3DPRIMITIVETYPE PrimitiveType) {
+    if (unlikely(StereoAudit() && IsStereoMultiview()))
+      m_stereoAuditDraws[m_stereoAuditKey] += 1;
     if (config::HazardTrackingEnabled) {
       if (unlikely(m_activeHazardsRT != 0)) {
         EmitCs([](DxvkContext* ctx) {
