@@ -332,6 +332,15 @@ namespace dxvk {
       return m_sampleView.Pick(srgb && IsSrgbCompatible());
     }
 
+    /* Apple port (stereo): under LB_STEREO_MULTIVIEW a 2D texture also has a 2D-array sampling view over all its
+     * layers (1, or 2 for a stereo target), which pixel shaders bind (their 2D samplers are arrays, DxsoSamplerInfo
+     * arrayed); null otherwise, and then GetSampleView is used. */
+    const Rc<DxvkImageView>& GetSampleViewStereo(bool srgb) const {
+      return m_sampleViewStereo.Pick(srgb && IsSrgbCompatible());
+    }
+
+    uint32_t GetStereoLayers() const { return m_stereoLayers; }
+
     VkImageLayout DetermineRenderTargetLayout() const {
       return m_image != nullptr &&
              m_image->info().tiling == VK_IMAGE_TILING_OPTIMAL &&
@@ -453,6 +462,7 @@ namespace dxvk {
     bool                          m_hazardous = false;
 
     D3D9ColorView                 m_sampleView;
+    D3D9ColorView                 m_sampleViewStereo;
 
     D3D9SubresourceBitset         m_locked = { };
 

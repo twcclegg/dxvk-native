@@ -552,6 +552,20 @@ namespace dxvk {
 
     if (IsSrgbCompatible())
       m_sampleView.Srgb = CreateView(AllLayers, Lod, VK_IMAGE_USAGE_SAMPLED_BIT, true);
+
+    // Apple port (stereo): the pixel shaders' 2D-array view (GetSampleViewStereo)
+    if (m_device->IsStereoMultiview() && m_type == D3DRTYPE_TEXTURE && m_desc.ArraySize == 1) {
+      auto arrayView = [this, Lod] (bool srgb) {
+        DxvkImageViewCreateInfo info = CreateView(AllLayers, Lod, VK_IMAGE_USAGE_SAMPLED_BIT, srgb)->info();
+        info.type      = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        info.minLayer  = 0;
+        info.numLayers = m_stereoLayers;
+        return m_device->GetDXVKDevice()->createImageView(GetImage(), info);
+      };
+      m_sampleViewStereo.Color = arrayView(false);
+      if (IsSrgbCompatible())
+        m_sampleViewStereo.Srgb = arrayView(true);
+    }
   }
 
 

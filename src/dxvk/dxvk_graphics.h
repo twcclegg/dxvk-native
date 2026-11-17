@@ -240,7 +240,8 @@ namespace dxvk {
     
     DxvkShaderModule createShaderModule(
       const Rc<DxvkShader>&                shader,
-      const DxvkGraphicsPipelineStateInfo& state) const;
+      const DxvkGraphicsPipelineStateInfo& state,
+            uint32_t                       viewMask) const;
     
     Rc<DxvkShader> getPrevStageShader(
             VkShaderStageFlagBits          stage) const;

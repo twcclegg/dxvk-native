@@ -6043,9 +6043,17 @@ namespace dxvk {
     D3D9CommonTexture* commonTex =
       GetCommonTexture(m_state.textures[StateSampler]);
 
+    // Apple port (stereo): pixel shaders sample 2D textures through 2D-array views under multiview
+    Rc<DxvkImageView> view = commonTex->GetSampleView(srgb);
+    if (unlikely(IsStereoMultiview()) && shaderSampler.first == DxsoProgramType::PixelShader) {
+      const Rc<DxvkImageView>& stereoView = commonTex->GetSampleViewStereo(srgb);
+      if (stereoView != nullptr)
+        view = stereoView;
+    }
+
     EmitCs([
       cSlot = slot,
-      cImageView = commonTex->GetSampleView(srgb)
+      cImageView = std::move(view)
     ](DxvkContext* ctx) {
       ctx->bindResourceView(cSlot, cImageView, nullptr);
     });
@@ -6298,6 +6306,16 @@ namespace dxvk {
       if (DecodeFilter(D3DTEXTUREFILTERTYPE(samplerState[D3DSAMP_MAGFILTER])) == VK_FILTER_LINEAR
        || DecodeFilter(D3DTEXTUREFILTERTYPE(samplerState[D3DSAMP_MINFILTER])) == VK_FILTER_LINEAR)
         depthFilterMask |= 1u << i;
+    }
+
+    // Stereo: bit 16 + slot when the pixel shader's texture there is a two-layer stereo target, so its arrayed
+    // sampler reads layer gl_ViewIndex (DxsoCompiler::emitStereoLayer) instead of 0.
+    if (unlikely(IsStereoMultiview())) {
+      for (uint32_t i : bit::BitMask(usedTextureMask & 0xffffu)) {
+        D3D9CommonTexture* tex = GetCommonTexture(m_state.textures[i]);
+        if (tex != nullptr && tex->GetStereoLayers() > 1)
+          depthFilterMask |= 1u << (16 + i);
+      }
     }
 
     if (depthFilterMask != m_lastSamplerDepthFilter)

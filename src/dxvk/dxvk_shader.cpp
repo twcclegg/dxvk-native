@@ -189,6 +189,9 @@ namespace dxvk {
     for (uint32_t u : bit::BitMask(info.undefinedInputs))
       eliminateInput(spirvCode, u);
 
+    if (info.noViewIndex)
+      eliminateInput(spirvCode, 0, spv::BuiltInViewIndex);
+
     return DxvkShaderModule(vkd, this, spirvCode);
   }
   
@@ -198,7 +201,7 @@ namespace dxvk {
   }
 
 
-  void DxvkShader::eliminateInput(SpirvCodeBuffer& code, uint32_t location) {
+  void DxvkShader::eliminateInput(SpirvCodeBuffer& code, uint32_t location, uint32_t builtIn) {
     struct SpirvTypeInfo {
       spv::Op           op            = spv::OpNop;
       uint32_t          baseTypeId    = 0;
@@ -217,8 +220,13 @@ namespace dxvk {
 
     for (auto ins : code) {
       if (ins.opCode() == spv::OpDecorate) {
-        if (ins.arg(2) == spv::DecorationLocation
+        if (builtIn == ~0u
+         && ins.arg(2) == spv::DecorationLocation
          && ins.arg(3) == location)
+          candidates.insert(ins.arg(1));
+        if (builtIn != ~0u
+         && ins.arg(2) == spv::DecorationBuiltIn
+         && ins.arg(3) == builtIn)
           candidates.insert(ins.arg(1));
       }
 
@@ -377,6 +385,23 @@ namespace dxvk {
             depth += entry->second;
             ins.setArg(1, privateTypes.at(depth).first);
             accessChainIds.insert({ ins.arg(2), depth });
+          }
+        }
+      }
+    }
+
+    // A built-in turned private keeps no decorations (BuiltIn, Flat): remove them
+    if (builtIn != ~0u) {
+      bool removed = true;
+      while (removed) {
+        removed = false;
+        for (auto ins : code) {
+          if (ins.opCode() == spv::OpDecorate && ins.arg(1) == inputVarId) {
+            code.beginInsertion(ins.offset());
+            code.erase(ins.length());
+            code.endInsertion();
+            removed = true;
+            break;
           }
         }
       }

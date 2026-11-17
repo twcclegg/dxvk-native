@@ -123,6 +123,9 @@ namespace dxvk {
   struct DxvkShaderModuleCreateInfo {
     bool      fsDualSrcBlend  = false;
     uint32_t  undefinedInputs = 0;
+    // Apple port (stereo): the pipeline's render pass is not multiview, so a fragment shader's gl_ViewIndex
+    // input becomes the constant 0 (MoltenVK cannot compile a fragment ViewIndex outside multiview).
+    bool      noViewIndex     = false;
   };
   
   
@@ -294,7 +297,7 @@ namespace dxvk {
     size_t m_o1IdxOffset = 0;
     size_t m_o1LocOffset = 0;
 
-    static void eliminateInput(SpirvCodeBuffer& code, uint32_t location);
+    static void eliminateInput(SpirvCodeBuffer& code, uint32_t location, uint32_t builtIn = ~0u);
 
   };
   
