@@ -86,4 +86,8 @@ namespace dxvk {
 
   constexpr uint32_t DxsoStereoViewCount = 2;
 
+  /* vec4 index of the per-view clip matrices (multiview only): mat4[2] after the two shifts, i.e. vec4 8..15.
+   * clip' = M[view] * clip - shift[view] for perspective vertices; M is the identity unless set. */
+  constexpr uint32_t DxsoStereoClipMatrixIndex = DxsoStereoClipShiftIndex + DxsoStereoViewCount;
+
 }

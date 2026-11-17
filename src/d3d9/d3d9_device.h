@@ -1259,6 +1259,8 @@ namespace dxvk {
     uint32_t                        m_lastPointMode = 0;
     // dxvk_stereo.h: clip-space offset xyzw per view (view 1 is used only with multiview)
     std::array<std::array<float, 4>, 2> m_stereoClipShiftBound = {};
+    std::array<std::array<float, 16>, 2> m_stereoClipMatrixBound = {{
+      {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }}, {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }} }};
     uint32_t                        m_lastFetch4    = 0;
     uint32_t                        m_lastHazardsDS = 0;
     uint32_t                        m_lastSamplerTypesFF = 0;
