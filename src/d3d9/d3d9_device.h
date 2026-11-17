@@ -660,6 +660,14 @@ namespace dxvk {
       return m_dxsoOptions.stereoMultiview;
     }
 
+    /* Apple port (stereo): LB_STEREO_MV_AUDIT=1 prints, once a second, the draws per frame of each pass
+     * signature (view mask, each attachment's size, format and layer count). */
+    static bool StereoAudit();
+    void StereoAuditPresent();
+    std::string                            m_stereoAuditKey;
+    std::unordered_map<std::string, uint32_t> m_stereoAuditDraws;
+    uint32_t                               m_stereoAuditFrames = 0;
+
     /* Apple port (stereo): number of image layers for a new texture or surface: 2 for a render target or
      * depth-stencil surface with the implicit swap chain's back buffer size (not the back buffer itself)
      * when IsStereoMultiview(), else 1. See D3D9CommonTexture::CreatePrimaryImage. */
