@@ -973,7 +973,7 @@ namespace dxvk {
     if (!recreate) {
       const DxvkImageCreateInfo& tap = m_presentTapState->images[0]->info();
       recreate = tap.format != src.format || tap.extent.width != src.extent.width
-              || tap.extent.height != src.extent.height;
+              || tap.extent.height != src.extent.height || tap.numLayers != src.numLayers;
     }
 
     if (recreate) {
@@ -986,7 +986,7 @@ namespace dxvk {
       info.flags       = 0;
       info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
       info.extent      = { src.extent.width, src.extent.height, 1u };
-      info.numLayers   = 1;
+      info.numLayers   = src.numLayers;  // 2: a stereo back buffer (LB_STEREO_PRESENT), eye i in layer i
       info.mipLevels   = 1;
       info.usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
       info.stages      = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1010,7 +1010,7 @@ namespace dxvk {
 
       m_presentTapNext = (slot + 1) % D3D9PresentTapState::Slots;
 
-      VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+      VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, src.numLayers };
       m_context->copyImage(
         m_presentTapState->images[slot], layers, VkOffset3D { 0, 0, 0 },
         Source,                          layers, VkOffset3D { 0, 0, 0 },
@@ -1046,6 +1046,11 @@ namespace dxvk {
      || src.extent.width != color.extent.width || src.extent.height != color.extent.height)
       return;
 
+    // Stereo: both layers when the colour has two (each eye's depth); else layer 0.
+    const uint32_t layerCount = std::min(src.numLayers, color.numLayers);
+    if (state->depthImages[Slot] != nullptr && state->depthImages[Slot]->info().numLayers != layerCount)
+      state->depthImages[Slot] = nullptr;
+
     if (state->depthImages[Slot] == nullptr) {
       DxvkImageCreateInfo info = { };
       info.type        = VK_IMAGE_TYPE_2D;
@@ -1053,7 +1058,7 @@ namespace dxvk {
       info.flags       = 0;
       info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
       info.extent      = { src.extent.width, src.extent.height, 1u };
-      info.numLayers   = 1;
+      info.numLayers   = layerCount;
       info.mipLevels   = 1;
       info.usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
       info.stages      = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1063,7 +1068,7 @@ namespace dxvk {
       state->depthImages[Slot] = m_device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     }
 
-    VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, layerCount };
     m_context->copyImage(
       state->depthImages[Slot], layers, VkOffset3D { 0, 0, 0 },
       depth,                    layers, VkOffset3D { 0, 0, 0 },
@@ -1092,6 +1097,7 @@ namespace dxvk {
     frame.width     = info.extent.width;
     frame.height    = info.extent.height;
     frame.vk_format = uint32_t(info.format);
+    frame.layers    = info.numLayers;
     frame.frame_id  = m_frameId;
     frame.state     = state;
     if (state->hasDepth[Slot]) {
@@ -1100,6 +1106,7 @@ namespace dxvk {
       frame.depth_width     = depth.extent.width;
       frame.depth_height    = depth.extent.height;
       frame.depth_vk_format = uint32_t(depth.format);
+      frame.depth_layers    = depth.numLayers;
     }
 
     state->incRef(); // dropped by dxvk_present_tap_release
