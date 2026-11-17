@@ -51,6 +51,10 @@ void dxvk_stereo_set_view_clip_offsets(const float view0[4], const float view1[4
  * camera for the same scene is exactly such a matrix: M = P_eye * V_eye_from_game * inverse(P_game) (column-vector
  * form), so a view can render a moved, turned or differently framed eye. Thread-safe; takes effect at the next draw. */
 void dxvk_stereo_set_view_clip_matrices(const float view0[16], const float view1[16]);
+/* The depth of a depth-stencil surface (IDirect3DSurface9*, a 24-bit or float depth format) copied into an R32F
+ * render target of the same size (every layer both have), on the GPU: replaces a pass that redraws the scene only
+ * to get its depth into a sampleable target. Returns an HRESULT. */
+long dxvk_copy_depth_to_float(void* device, void* depthStencil, void* floatTarget);
 /* 1 when LB_STEREO_EYE_UNITS or LB_STEREO_MULTIVIEW turned the shader code on, else 0 (and set_clip_shift does
  * nothing visible). */
 int dxvk_stereo_enabled(void);
