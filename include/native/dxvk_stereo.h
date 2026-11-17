@@ -46,6 +46,11 @@ void dxvk_stereo_set_clip_offset(float x, float y, float z, float w);
 /* Both views' offsets explicitly (each xyzw as in set_clip_offset; view 1 is used only in multiview passes).
  * Mono passes use view0. Thread-safe; takes effect at the next draw. */
 void dxvk_stereo_set_view_clip_offsets(const float view0[4], const float view1[4]);
+/* Multiview only: a clip-space matrix per view, column-major, applied before the offsets: clip' = M * clip -
+ * offset, for perspective vertices in the main scene's passes (as the offsets). Identity by default. Any other
+ * camera for the same scene is exactly such a matrix: M = P_eye * V_eye_from_game * inverse(P_game) (column-vector
+ * form), so a view can render a moved, turned or differently framed eye. Thread-safe; takes effect at the next draw. */
+void dxvk_stereo_set_view_clip_matrices(const float view0[16], const float view1[16]);
 /* 1 when LB_STEREO_EYE_UNITS or LB_STEREO_MULTIVIEW turned the shader code on, else 0 (and set_clip_shift does
  * nothing visible). */
 int dxvk_stereo_enabled(void);
