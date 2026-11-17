@@ -741,9 +741,21 @@ namespace dxvk {
           break;
       }
 
+      sampler.samplerIdx = idx;
+      sampler.arrayed = false;
+#ifdef __APPLE__
+      if (type == SamplerTypeTexture2D && !depth
+       && m_programInfo.type() == DxsoProgramTypes::PixelShader
+       && m_moduleInfo.options.stereoMultiview) {
+        sampler.arrayed = true;
+        suffix = "_2d_stereo";
+        viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;  // also what an unbound slot's dummy view must be
+      }
+#endif
+
       sampler.imageTypeId = m_module.defImageType(
         m_module.defFloatType(32),
-        dimensionality, depth ? 1 : 0, 0, 0, 1,
+        dimensionality, depth ? 1 : 0, sampler.arrayed ? 1 : 0, 0, 1,
         spv::ImageFormatUnknown);
 
       sampler.typeId = m_module.defSampledImageType(sampler.imageTypeId);
@@ -3125,6 +3137,57 @@ void DxsoCompiler::emitControlFlowGenericLoop(
   }
 
 
+#ifdef __APPLE__
+  uint32_t DxsoCompiler::emitStereoLayer(uint32_t samplerIdx) {
+    const uint32_t intType   = m_module.defIntType(32, 1);
+    const uint32_t uintType  = m_module.defIntType(32, 0);
+    const uint32_t floatType = m_module.defFloatType(32);
+
+    if (!m_ps.viewIndexVar) {
+      m_module.enableCapability(spv::CapabilityMultiView);
+      m_ps.viewIndexVar = m_module.newVar(
+        m_module.defPointerType(intType, spv::StorageClassInput),
+        spv::StorageClassInput);
+      m_module.decorateBuiltIn(m_ps.viewIndexVar, spv::BuiltInViewIndex);
+      m_module.decorate(m_ps.viewIndexVar, spv::DecorationFlat);
+      m_module.setDebugName(m_ps.viewIndexVar, "view_index");
+      m_entryPointInterfaces.push_back(m_ps.viewIndexVar);
+    }
+
+    uint32_t stereo = m_module.opBitFieldUExtract(uintType, m_ps.depthFilterSpec,
+      m_module.consti32(16 + samplerIdx), m_module.consti32(1));
+    stereo = m_module.opIEqual(m_module.defBoolType(), stereo, m_module.constu32(1));
+
+    uint32_t view = m_module.opConvertStoF(floatType, m_module.opLoad(intType, m_ps.viewIndexVar));
+    return m_module.opSelect(floatType, stereo, view, m_module.constf32(0.0f));
+  }
+
+
+  DxsoRegisterValue DxsoCompiler::emitStereoCoords(
+    const DxsoSamplerInfo&        samplerInfo,
+          DxsoRegisterValue       coordinates,
+          bool                    projected) {
+    const uint32_t floatType = m_module.defFloatType(32);
+    uint32_t i0 = 0, i1 = 1;
+    uint32_t x = m_module.opCompositeExtract(floatType, coordinates.id, 1, &i0);
+    uint32_t y = m_module.opCompositeExtract(floatType, coordinates.id, 1, &i1);
+
+    if (projected) {
+      uint32_t qIndex = samplerInfo.dimensions;
+      uint32_t q = m_module.opCompositeExtract(floatType, coordinates.id, 1, &qIndex);
+      x = m_module.opFDiv(floatType, x, q);
+      y = m_module.opFDiv(floatType, y, q);
+    }
+
+    const std::array<uint32_t, 3> c3 = { x, y, emitStereoLayer(samplerInfo.samplerIdx) };
+    DxsoRegisterValue result;
+    result.type = { DxsoScalarType::Float32, 3 };
+    result.id = m_module.opCompositeConstruct(getVectorTypeId(result.type), c3.size(), c3.data());
+    return result;
+  }
+#endif
+
+
   uint32_t DxsoCompiler::emitSample(
           bool                    projected,
           uint32_t                resultType,
@@ -3140,6 +3203,17 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     const bool depthCompare = reference != 0;
 
 #ifdef __APPLE__
+    if (samplerInfo.arrayed) {
+      // Arrayed images have no projective sample ops: divide here, then sample (x, y, layer).
+      if (projected && depthCompare) {
+        uint32_t qIndex = samplerInfo.dimensions;
+        uint32_t q = m_module.opCompositeExtract(m_module.defFloatType(32), coordinates.id, 1, &qIndex);
+        reference = m_module.opFDiv(m_module.defFloatType(32), reference, q);
+      }
+      coordinates = emitStereoCoords(samplerInfo, coordinates, projected);
+      projected = false;
+    }
+
     if (depthCompare) {
       return emitDepthCompareEmulated(projected, resultType, samplerInfo,
         coordinates, reference, depthFilterLinear, operands);
@@ -3202,7 +3276,14 @@ void DxsoCompiler::emitControlFlowGenericLoop(
         // textureSize = 1.0f / float(2 * textureSize(sampler, 0))
         DxsoRegisterValue textureSize;
         textureSize.type = { DxsoScalarType::Sint32, samplerInfo.dimensions };
-        textureSize.id = m_module.opImageQuerySizeLod(getVectorTypeId(textureSize.type), image, m_module.consti32(0));
+        if (samplerInfo.arrayed) {
+          // (w, h, layers): keep (w, h)
+          const std::array<uint32_t, 2> wh = { 0, 1 };
+          uint32_t full = m_module.opImageQuerySizeLod(getVectorTypeId({ DxsoScalarType::Sint32, 3 }), image, m_module.consti32(0));
+          textureSize.id = m_module.opVectorShuffle(getVectorTypeId(textureSize.type), full, full, wh.size(), wh.data());
+        } else {
+          textureSize.id = m_module.opImageQuerySizeLod(getVectorTypeId(textureSize.type), image, m_module.consti32(0));
+        }
         textureSize.id = m_module.opIMul(getVectorTypeId(textureSize.type), textureSize.id, m_module.constiReplicant(2, samplerInfo.dimensions));
 
         textureSize.type = { DxsoScalarType::Float32, samplerInfo.dimensions };
@@ -3216,10 +3297,24 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
         // coord => same dimensions as texture size (no cube here !)
         const std::array<uint32_t, 4> naturalIndices = { 0, 1, 2, 3 };
+        uint32_t layer = 0;
+        if (samplerInfo.arrayed) {  // (x, y, layer) from emitStereoCoords: keep the layer for the gather
+          uint32_t two = 2;
+          layer = m_module.opCompositeExtract(m_module.defFloatType(32), coordinates.id, 1, &two);
+        }
         coordinates.type.ccount = samplerInfo.dimensions;
         coordinates.id = m_module.opVectorShuffle(getVectorTypeId(coordinates.type), coordinates.id, coordinates.id, coordinates.type.ccount, naturalIndices.data());
         // coord += textureSize;
         coordinates.id = m_module.opFAdd(getVectorTypeId(coordinates.type), coordinates.id, textureSize.id);
+        if (samplerInfo.arrayed) {
+          std::array<uint32_t, 3> c3 = { 0, 0, layer };
+          uint32_t fl = m_module.defFloatType(32);
+          uint32_t i0 = 0, i1 = 1;
+          c3[0] = m_module.opCompositeExtract(fl, coordinates.id, 1, &i0);
+          c3[1] = m_module.opCompositeExtract(fl, coordinates.id, 1, &i1);
+          coordinates.type.ccount = 3;
+          coordinates.id = m_module.opCompositeConstruct(getVectorTypeId(coordinates.type), c3.size(), c3.data());
+        }
       }
 
       uint32_t fetch4Val = m_module.opImageGather(resultType, sampledImage, coordinates.id, m_module.consti32(0), fetch4Operands);
@@ -3314,7 +3409,18 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     // Shadow maps have a single level; the taps use level 0.
     const uint32_t ivec2Type = m_module.defVectorType(m_module.defIntType(32, 1), 2);
     const uint32_t image = m_module.opImage(samplerInfo.imageTypeId, sampledImage);
-    uint32_t size = m_module.opImageQuerySizeLod(ivec2Type, image, m_module.consti32(0));
+    uint32_t size;
+    uint32_t tapLayer = 0;
+    if (samplerInfo.arrayed) {
+      const std::array<uint32_t, 2> wh = { 0, 1 };
+      const uint32_t ivec3Type = m_module.defVectorType(m_module.defIntType(32, 1), 3);
+      uint32_t full = m_module.opImageQuerySizeLod(ivec3Type, image, m_module.consti32(0));
+      size = m_module.opVectorShuffle(ivec2Type, full, full, wh.size(), wh.data());
+      uint32_t two = 2;
+      tapLayer = m_module.opCompositeExtract(floatType, coordinates.id, 1, &two);
+    } else {
+      size = m_module.opImageQuerySizeLod(ivec2Type, image, m_module.consti32(0));
+    }
     size = m_module.opConvertStoF(vec2Type, size);
 
     const uint32_t t    = m_module.opFSub(vec2Type,
@@ -3329,6 +3435,12 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     auto Tap = [&](float dx, float dy) {
       uint32_t coord = m_module.opFAdd(vec2Type, base, m_module.constvec2f32(dx + 0.5f, dy + 0.5f));
       coord = m_module.opFDiv(vec2Type, coord, size);
+      if (samplerInfo.arrayed) {
+        uint32_t i0 = 0, i1 = 1;
+        const std::array<uint32_t, 3> c3 = { m_module.opCompositeExtract(floatType, coord, 1, &i0),
+                                             m_module.opCompositeExtract(floatType, coord, 1, &i1), tapLayer };
+        coord = m_module.opCompositeConstruct(m_module.defVectorType(floatType, 3), c3.size(), c3.data());
+      }
       return Compare(m_module.opImageSampleExplicitLod(vec4Type, sampledImage, coord, lod0));
     };
 

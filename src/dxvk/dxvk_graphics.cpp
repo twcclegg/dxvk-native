@@ -178,11 +178,11 @@ namespace dxvk {
     
     VkSpecializationInfo specInfo = specData.getSpecInfo();
     
-    auto vsm  = createShaderModule(m_shaders.vs,  state);
-    auto tcsm = createShaderModule(m_shaders.tcs, state);
-    auto tesm = createShaderModule(m_shaders.tes, state);
-    auto gsm  = createShaderModule(m_shaders.gs,  state);
-    auto fsm  = createShaderModule(m_shaders.fs,  state);
+    auto vsm  = createShaderModule(m_shaders.vs,  state, passFormat.viewMask);
+    auto tcsm = createShaderModule(m_shaders.tcs, state, passFormat.viewMask);
+    auto tesm = createShaderModule(m_shaders.tes, state, passFormat.viewMask);
+    auto gsm  = createShaderModule(m_shaders.gs,  state, passFormat.viewMask);
+    auto fsm  = createShaderModule(m_shaders.fs,  state, passFormat.viewMask);
 
     std::vector<VkPipelineShaderStageCreateInfo> stages;
     if (vsm)  stages.push_back(vsm.stageInfo(&specInfo));
@@ -435,11 +435,13 @@ namespace dxvk {
 
   DxvkShaderModule DxvkGraphicsPipeline::createShaderModule(
     const Rc<DxvkShader>&                shader,
-    const DxvkGraphicsPipelineStateInfo& state) const {
+    const DxvkGraphicsPipelineStateInfo& state,
+          uint32_t                       viewMask) const {
     if (shader == nullptr)
       return DxvkShaderModule();
 
     DxvkShaderModuleCreateInfo info;
+    info.noViewIndex = shader->stage() == VK_SHADER_STAGE_FRAGMENT_BIT && viewMask == 0;
 
     // Fix up fragment shader outputs for dual-source blending
     if (shader->stage() == VK_SHADER_STAGE_FRAGMENT_BIT) {
