@@ -65,7 +65,7 @@ namespace dxvk {
     }
 
     static bool validateShaderType(const Rc<DxvkShader>& shader, VkShaderStageFlagBits stage) {
-      return shader == nullptr || shader->info().stage == stage;
+      return shader == nullptr || shader->stage() == stage;
     }
   };
   
