@@ -1,5 +1,6 @@
 #pragma once
 
+#include <deque>
 #include <mutex>
 
 #include "dxvk_bind_mask.h"
@@ -221,7 +222,7 @@ namespace dxvk {
     
     // List of pipeline instances, shared between threads
     alignas(CACHE_LINE_SIZE) sync::Spinlock   m_mutex;
-    std::vector<DxvkGraphicsPipelineInstance> m_pipelines;
+    std::deque<DxvkGraphicsPipelineInstance>  m_pipelines;
     
     DxvkGraphicsPipelineInstance* createInstance(
       const DxvkGraphicsPipelineStateInfo& state,
