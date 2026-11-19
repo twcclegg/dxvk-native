@@ -40,6 +40,9 @@ namespace dxvk {
     D3D9FixedFunctionOptions(const D3D9Options* options);
 
     bool invariantPosition;
+    /* Apple port (stereo): the device renders multiview, so the vertex shader also passes gl_ViewIndex to the
+     * pixel shader (DxsoStereoViewSlot), which picks each view's layer of a stereo texture with it. */
+    bool stereoMultiview = false;
   };
 
   // Returns new oFog if VS

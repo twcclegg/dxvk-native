@@ -903,6 +903,22 @@ namespace dxvk {
 
     m_module.opStore(m_vs.out.POSITION, gl_Position);
 
+    if (m_options.stereoMultiview) {
+      // gl_ViewIndex for the pixel shader (DxsoStereoViewSlot; see DxsoCompiler::emitStereoLayer).
+      m_module.enableCapability(spv::CapabilityMultiView);
+      uint32_t intType = m_module.defIntType(32, 1);
+      uint32_t viewIn = m_module.newVar(m_module.defPointerType(intType, spv::StorageClassInput), spv::StorageClassInput);
+      m_module.decorateBuiltIn(viewIn, spv::BuiltInViewIndex);
+      m_entryPointInterfaces.push_back(viewIn);
+      uint32_t viewOut = m_module.newVar(m_module.defPointerType(intType, spv::StorageClassOutput), spv::StorageClassOutput);
+      m_module.decorateLocation(viewOut, DxsoStereoViewSlot);
+      m_module.decorate(viewOut, spv::DecorationFlat);
+      m_module.setDebugName(viewOut, "stereo_view");
+      m_entryPointInterfaces.push_back(viewOut);
+      m_module.opStore(viewOut, m_module.opLoad(intType, viewIn));
+      m_interfaceSlots.outputSlots |= 1u << DxsoStereoViewSlot;
+    }
+
     std::array<uint32_t, 4> outNrmIndices;
     for (uint32_t i = 0; i < 3; i++)
       outNrmIndices[i] = m_module.opCompositeExtract(m_floatType, normal, 1, &i);
@@ -2314,10 +2330,12 @@ namespace dxvk {
 
     std::string name = str::format("FF_", shaderKey.toString());
 
+    D3D9FixedFunctionOptions options(pDevice->GetOptions());
+    options.stereoMultiview = pDevice->IsStereoMultiview();
     D3D9FFShaderCompiler compiler(
       pDevice->GetDXVKDevice(),
       Key, name,
-      pDevice->GetOptions());
+      options);
 
     m_shader = compiler.compile();
     m_isgn   = compiler.isgn();

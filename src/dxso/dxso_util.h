@@ -116,5 +116,8 @@ namespace dxvk {
   /* vec4 index of the per-view offset for w == 1 vertices (multiview only, vec4[2] at 16..17): zero except while
    * the runtime draws the interface, which it places at a depth (dxvk_stereo_set_view_ui_offsets). */
   constexpr uint32_t DxsoStereoUiShiftIndex = DxsoStereoClipMatrixIndex + 4 * DxsoStereoViewCount;
+  /* Apple port (stereo, multiview): the interface slot (location) through which vertex shaders pass gl_ViewIndex
+   * to pixel shaders. Far above the game's own linker slots (RegisterLinkerSlot hands them out from 0). */
+  constexpr uint32_t DxsoStereoViewSlot = 31;
 
 }

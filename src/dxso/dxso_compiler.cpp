@@ -3147,14 +3147,19 @@ void DxsoCompiler::emitControlFlowGenericLoop(
     const uint32_t floatType = m_module.defFloatType(32);
 
     if (!m_ps.viewIndexVar) {
-      m_module.enableCapability(spv::CapabilityMultiView);
+      /* The view comes from the vertex shader (stereo_view, DxsoStereoViewSlot), not from the fragment stage's
+       * own gl_ViewIndex: on the Vision Pro, MoltenVK gives fragment shaders view 0 in both views (both layers of
+       * the final image came out as the left eye's, while vertex positions and depth were per eye). A vertex
+       * shader that doesn't write it (fixed function) leaves it undefined, which DXVK replaces with 0: view 0's
+       * layer, as before. */
       m_ps.viewIndexVar = m_module.newVar(
         m_module.defPointerType(intType, spv::StorageClassInput),
         spv::StorageClassInput);
-      m_module.decorateBuiltIn(m_ps.viewIndexVar, spv::BuiltInViewIndex);
+      m_module.decorateLocation(m_ps.viewIndexVar, DxsoStereoViewSlot);
       m_module.decorate(m_ps.viewIndexVar, spv::DecorationFlat);
-      m_module.setDebugName(m_ps.viewIndexVar, "view_index");
+      m_module.setDebugName(m_ps.viewIndexVar, "stereo_view");
       m_entryPointInterfaces.push_back(m_ps.viewIndexVar);
+      m_interfaceSlots.inputSlots |= 1u << DxsoStereoViewSlot;
     }
 
     uint32_t stereo = m_module.opBitFieldUExtract(uintType, m_ps.depthFilterSpec,
@@ -3879,6 +3884,17 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
         shiftMembers[1] = m_module.opLoad(intType, viewIndexVar);
         shiftMemberCount = 2;
+
+        // The view for the pixel shader (emitStereoLayer), which can't rely on its own gl_ViewIndex.
+        uint32_t viewOut = m_module.newVar(
+          m_module.defPointerType(intType, spv::StorageClassOutput),
+          spv::StorageClassOutput);
+        m_module.decorateLocation(viewOut, DxsoStereoViewSlot);
+        m_module.decorate(viewOut, spv::DecorationFlat);
+        m_module.setDebugName(viewOut, "stereo_view");
+        m_entryPointInterfaces.push_back(viewOut);
+        m_module.opStore(viewOut, shiftMembers[1]);
+        m_interfaceSlots.outputSlots |= 1u << DxsoStereoViewSlot;
       }
 
       // The whole vec4: x alone for a sideways eye (set_clip_shift), or any eye translation (set_clip_offset).
