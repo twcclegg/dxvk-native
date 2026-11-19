@@ -16,6 +16,7 @@ namespace {
   std::atomic<void*>                 g_presentTapUser = { nullptr };
   std::atomic<bool>                  g_presentTapExclusive = { false };
   std::atomic<IDirect3DSurface9*>    g_presentTapDepth = { nullptr };
+  std::atomic<IDirect3DSurface9*>    g_presentTapHud = { nullptr };
 }
 #endif
 
@@ -1026,6 +1027,7 @@ namespace dxvk {
         Source,                          layers, VkOffset3D { 0, 0, 0 },
         VkExtent3D { src.extent.width, src.extent.height, 1u });
       RecordPresentTapDepth(slot);
+      RecordPresentTapHud(slot);
       return int32_t(slot);
     }
 
@@ -1087,6 +1089,57 @@ namespace dxvk {
   }
 
 
+  void D3D9SwapChainEx::RecordPresentTapHud(uint32_t Slot) {
+    D3D9PresentTapState* state = m_presentTapState.ptr();
+    state->hasHud[Slot] = false;
+
+    // The interface drawn on its own (runtime LB_HUD_LAYER): a single-sample 8-bit RGBA colour target.
+    IDirect3DSurface9* named = g_presentTapHud.load(std::memory_order_acquire);
+    if (named == nullptr)
+      return;
+    D3D9CommonTexture* texture = static_cast<D3D9Surface*>(named)->GetCommonTexture();
+    if (texture == nullptr)
+      return;
+    Rc<DxvkImage> hud = texture->GetImage();
+    if (hud == nullptr)
+      return;
+    const DxvkImageCreateInfo& src = hud->info();
+    if ((src.format != VK_FORMAT_B8G8R8A8_UNORM && src.format != VK_FORMAT_R8G8B8A8_UNORM)
+     || src.sampleCount != VK_SAMPLE_COUNT_1_BIT)
+      return;
+
+    if (state->hudImages[Slot] != nullptr) {
+      const DxvkImageCreateInfo& have = state->hudImages[Slot]->info();
+      if (have.format != src.format || have.extent.width != src.extent.width || have.extent.height != src.extent.height)
+        state->hudImages[Slot] = nullptr;
+    }
+
+    if (state->hudImages[Slot] == nullptr) {
+      DxvkImageCreateInfo info = { };
+      info.type        = VK_IMAGE_TYPE_2D;
+      info.format      = src.format;
+      info.flags       = 0;
+      info.sampleCount = VK_SAMPLE_COUNT_1_BIT;
+      info.extent      = { src.extent.width, src.extent.height, 1u };
+      info.numLayers   = 1;
+      info.mipLevels   = 1;
+      info.usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      info.stages      = VK_PIPELINE_STAGE_TRANSFER_BIT;
+      info.access      = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+      info.tiling      = VK_IMAGE_TILING_OPTIMAL;
+      info.layout      = VK_IMAGE_LAYOUT_GENERAL;
+      state->hudImages[Slot] = m_device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    }
+
+    VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    m_context->copyImage(
+      state->hudImages[Slot], layers, VkOffset3D { 0, 0, 0 },
+      hud,                    layers, VkOffset3D { 0, 0, 0 },
+      VkExtent3D { src.extent.width, src.extent.height, 1u });
+    state->hasHud[Slot] = true;
+  }
+
+
   void D3D9SwapChainEx::NotifyPresentTap(uint32_t Slot) {
     D3D9PresentTapState* state = m_presentTapState.ptr();
     dxvk_present_tap_fn fn = g_presentTapFn.load(std::memory_order_acquire);
@@ -1117,6 +1170,13 @@ namespace dxvk {
       frame.depth_height    = depth.extent.height;
       frame.depth_vk_format = uint32_t(depth.format);
       frame.depth_layers    = depth.numLayers;
+    }
+    if (state->hasHud[Slot]) {
+      const DxvkImageCreateInfo& hud = state->hudImages[Slot]->info();
+      frame.hud_vk_image  = uint64_t(reinterpret_cast<uintptr_t>(state->hudImages[Slot]->handle()));
+      frame.hud_width     = hud.extent.width;
+      frame.hud_height    = hud.extent.height;
+      frame.hud_vk_format = uint32_t(hud.format);
     }
 
     state->incRef(); // dropped by dxvk_present_tap_release
@@ -1631,6 +1691,11 @@ extern "C" int dxvk_present_tap_ready(void* state, uint64_t frame_id) {
 
 extern "C" void dxvk_present_tap_set_depth(void* surface) {
   g_presentTapDepth.store(static_cast<IDirect3DSurface9*>(surface), std::memory_order_release);
+}
+
+
+extern "C" void dxvk_present_tap_set_hud(void* surface) {
+  g_presentTapHud.store(static_cast<IDirect3DSurface9*>(surface), std::memory_order_release);
 }
 
 
