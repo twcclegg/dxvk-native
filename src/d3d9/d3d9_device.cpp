@@ -4043,6 +4043,9 @@ namespace dxvk {
 
       if (!supported.coreMultiview.multiview)
         Logger::err("D3D9: LB_STEREO_MULTIVIEW=1 but the Vulkan device has no multiview; rendering mono");
+      else if (adapter->devicePropertiesExt().core.properties.limits.maxFramebufferLayers < 2)
+        Logger::err("D3D9: LB_STEREO_MULTIVIEW=1 but the Vulkan device has no layered rendering"
+                    " (maxFramebufferLayers < 2, e.g. the visionOS simulator); rendering mono");
     }
 
     return enabled;
