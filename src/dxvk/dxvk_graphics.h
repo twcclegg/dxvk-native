@@ -268,6 +268,10 @@ namespace dxvk {
     void writePipelineStateToCache(
       const DxvkGraphicsPipelineStateInfo& state,
       const DxvkRenderPassFormat&          format) const;
+
+    std::string describeCacheMiss(
+      const DxvkGraphicsPipelineStateInfo& state,
+      const DxvkRenderPassFormat&          format) const;
     
     void logPipelineState(
             LogLevel                       level,
