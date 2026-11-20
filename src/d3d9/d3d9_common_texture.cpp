@@ -542,6 +542,36 @@ namespace dxvk {
   }
 
 
+  bool D3D9CommonTexture::MakeStereoLayered(uint32_t Layers) {
+    const uint32_t oldLayers = m_stereoLayers;
+    Rc<DxvkImage> image;
+
+    m_stereoLayers = Layers;
+    try {
+      image = CreatePrimaryImage(m_type, false);
+    } catch (const DxvkError& e) {
+      Logger::err(e.message());
+      m_stereoLayers = oldLayers;
+      return false;
+    }
+
+    if (m_size != 0)
+      m_device->ChangeReportedMemory(m_size);
+
+    m_image = std::move(image);
+    m_sampleView = D3D9ColorView();
+    m_sampleViewStereo = D3D9ColorView();
+    CreateSampleView(0);
+
+    if (!IsManaged()) {
+      m_size = m_image->memSize();
+      m_device->ChangeReportedMemory(-m_size);
+    }
+
+    return true;
+  }
+
+
   void D3D9CommonTexture::CreateSampleView(UINT Lod) {
     // This will be a no-op for SYSTEMMEM types given we
     // don't expose the cap to allow texturing with them.

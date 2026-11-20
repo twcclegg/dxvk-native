@@ -341,6 +341,12 @@ namespace dxvk {
 
     uint32_t GetStereoLayers() const { return m_stereoLayers; }
 
+    /* Apple port (stereo): replaces the image of a one-layer target with a new one of `Layers` layers, as if
+     * GetStereoLayerCount had given it that many, and remakes the sampling views. The contents are lost; the
+     * caller clears the subresources' cached views and initialises the new image (D3D9DeviceEx::MakeStereoLayered).
+     * False, with nothing changed, if the image cannot be made. */
+    bool MakeStereoLayered(uint32_t Layers);
+
     VkImageLayout DetermineRenderTargetLayout() const {
       return m_image != nullptr &&
              m_image->info().tiling == VK_IMAGE_TILING_OPTIMAL &&
