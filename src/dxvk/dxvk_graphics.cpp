@@ -96,8 +96,11 @@ namespace dxvk {
         // a state cache worker and the current thread needs priority.
         const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
         instance = this->createInstance(state, renderPass);
-        if (pipeLogEnabled())
-          std::fprintf(stderr, "pipe compiled at draw: %.1f ms\n", pipeNowMs() - t0);
+        if (pipeLogEnabled()) {
+          const double ms = pipeNowMs() - t0;
+          std::fprintf(stderr, "pipe compiled at draw: %.1f ms %s\n", ms,
+            this->describeCacheMiss(state, renderPass->format()).c_str());
+        }
         this->writePipelineStateToCache(state, renderPass->format());
       }
     }
@@ -630,6 +633,23 @@ namespace dxvk {
   }
   
   
+  std::string DxvkGraphicsPipeline::describeCacheMiss(
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPassFormat&          format) const {
+    if (m_pipeMgr->m_stateCache == nullptr)
+      return "cache: off";
+
+    DxvkStateCacheKey key;
+    if (m_shaders.vs  != nullptr) key.vs = m_shaders.vs->getShaderKey();
+    if (m_shaders.tcs != nullptr) key.tcs = m_shaders.tcs->getShaderKey();
+    if (m_shaders.tes != nullptr) key.tes = m_shaders.tes->getShaderKey();
+    if (m_shaders.gs  != nullptr) key.gs = m_shaders.gs->getShaderKey();
+    if (m_shaders.fs  != nullptr) key.fs = m_shaders.fs->getShaderKey();
+
+    return m_pipeMgr->m_stateCache->describeMiss(key, state, format);
+  }
+
+
   void DxvkGraphicsPipeline::logPipelineState(
           LogLevel                       level,
     const DxvkGraphicsPipelineStateInfo& state) const {

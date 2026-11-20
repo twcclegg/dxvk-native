@@ -187,6 +187,174 @@ namespace dxvk {
         return;
       }
     }
+
+    AppendBytecode(ShaderStage, lookupKey, pShaderBytecode, info.bytecodeByteLength);
+  }
+
+
+  /* Bytecode cache file (Apple port): a header, then per shader its stage, byte length,
+   * the SHA-1 of the bytecode (also its DxvkShaderKey hash) and the bytecode itself. */
+  struct D3D9BytecodeCacheHeader {
+    char     magic[4] = { 'D', 'X', 'S', 'O' };
+    uint32_t version  = 1;
+  };
+
+  struct D3D9BytecodeCacheEntryHeader {
+    uint32_t stage;
+    uint32_t byteLength;
+    Sha1Hash hash;
+  };
+
+  // Larger than any shader model 3 shader; a corrupt length must not allocate gigabytes
+  constexpr uint32_t MaxCachedBytecodeLength = 1u << 20;
+
+
+  D3D9ShaderModuleSet::~D3D9ShaderModuleSet() {
+    StopBytecodeCache();
+  }
+
+
+  void D3D9ShaderModuleSet::StartBytecodeCache(
+          D3D9DeviceEx*         pDevice,
+    const DxsoModuleInfo&       ModuleInfo) {
+    if (env::getEnvVar("DXVK_STATE_CACHE") == "0"
+     || env::getEnvVar("DXVK_SHADER_BYTECODE_CACHE") == "0"
+     || !pDevice->GetDXVKDevice()->config().enableStateCache)
+      return;
+
+    std::string dir = env::getEnvVar("DXVK_STATE_CACHE_PATH");
+    if (!dir.empty() && dir.back() != '/')
+      dir += '/';
+    m_cachePath = dir + env::getExeBaseName() + ".dxso-cache";
+
+    // Read what earlier runs created; stop at the first entry that doesn't check out
+    std::vector<std::pair<VkShaderStageFlagBits, std::vector<char>>> shaders;
+    bool rewrite = true;
+
+    { std::ifstream file(m_cachePath, std::ios_base::binary);
+      D3D9BytecodeCacheHeader expected, header;
+
+      if (file && file.read(reinterpret_cast<char*>(&header), sizeof(header))
+       && !std::memcmp(header.magic, expected.magic, sizeof(header.magic))
+       && header.version == expected.version) {
+        rewrite = false;
+        D3D9BytecodeCacheEntryHeader entry;
+
+        while (file.read(reinterpret_cast<char*>(&entry), sizeof(entry))) {
+          bool valid = (entry.stage == VK_SHADER_STAGE_VERTEX_BIT || entry.stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+                    && entry.byteLength && entry.byteLength <= MaxCachedBytecodeLength;
+          std::vector<char> code(valid ? entry.byteLength : 0);
+
+          if (!valid || !file.read(code.data(), code.size())
+           || Sha1Hash::compute(code.data(), code.size()) != entry.hash) {
+            Logger::warn("D3D9: Bytecode cache: invalid entry, rewriting the file");
+            rewrite = true;
+            break;
+          }
+
+          DxvkShaderKey key(VkShaderStageFlagBits(entry.stage), entry.hash);
+          if (m_cachedKeys.insert(key).second)
+            shaders.emplace_back(VkShaderStageFlagBits(entry.stage), std::move(code));
+        }
+      }
+    }
+
+    if (rewrite) {
+      // New, outdated or damaged: start over, keeping the shaders read before the damage
+      m_cacheFile.open(m_cachePath, std::ios_base::binary | std::ios_base::trunc);
+
+      if (!m_cacheFile && env::createDirectory(dir))
+        m_cacheFile.open(m_cachePath, std::ios_base::binary | std::ios_base::trunc);
+
+      D3D9BytecodeCacheHeader header;
+      m_cacheFile.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+      for (const auto& s : shaders) {
+        D3D9BytecodeCacheEntryHeader entry;
+        entry.stage      = s.first;
+        entry.byteLength = uint32_t(s.second.size());
+        entry.hash       = Sha1Hash::compute(s.second.data(), s.second.size());
+        m_cacheFile.write(reinterpret_cast<const char*>(&entry), sizeof(entry));
+        m_cacheFile.write(s.second.data(), s.second.size());
+      }
+
+      m_cacheFile.flush();
+    } else {
+      m_cacheFile.open(m_cachePath, std::ios_base::binary | std::ios_base::app);
+    }
+
+    if (!m_cacheFile) {
+      Logger::warn(str::format("D3D9: Bytecode cache: cannot write ", m_cachePath));
+      m_cacheFile = std::ofstream();
+    }
+
+    m_cacheEnabled = true;
+    Logger::info(str::format("D3D9: Bytecode cache: creating ", shaders.size(), " shaders of earlier runs"));
+
+    if (!shaders.empty()) {
+      m_cacheThread = dxvk::thread([this, pDevice, ModuleInfo, list = std::move(shaders)] () mutable {
+        CreateCachedShaders(pDevice, ModuleInfo, std::move(list));
+      });
+    }
+  }
+
+
+  void D3D9ShaderModuleSet::StopBytecodeCache() {
+    m_stopCaching.store(true);
+
+    if (m_cacheThread.joinable())
+      m_cacheThread.join();
+  }
+
+
+  void D3D9ShaderModuleSet::CreateCachedShaders(
+          D3D9DeviceEx*         pDevice,
+          DxsoModuleInfo        ModuleInfo,
+          std::vector<std::pair<VkShaderStageFlagBits, std::vector<char>>> Shaders) {
+    env::setThreadName("dxvk-dxso-cache");
+
+    auto t0 = dxvk::high_resolution_clock::now();
+    uint32_t created = 0;
+
+    for (const auto& s : Shaders) {
+      if (m_stopCaching.load())
+        return;
+
+      try {
+        D3D9CommonShader module;
+        GetShaderModule(pDevice, &module, s.first, &ModuleInfo, s.second.data());
+        created += 1;
+      } catch (const DxvkError& e) {
+        Logger::warn(str::format("D3D9: Bytecode cache: ", e.message()));
+      }
+    }
+
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(dxvk::high_resolution_clock::now() - t0);
+    Logger::info(str::format("D3D9: Bytecode cache: created ", created, " shaders in ", ms.count(), " ms"));
+  }
+
+
+  void D3D9ShaderModuleSet::AppendBytecode(
+          VkShaderStageFlagBits ShaderStage,
+    const DxvkShaderKey&        Key,
+    const void*                 pShaderBytecode,
+          uint32_t              ByteLength) {
+    if (!m_cacheEnabled || ByteLength == 0 || ByteLength > MaxCachedBytecodeLength)
+      return;
+
+    std::lock_guard<dxvk::mutex> lock(m_cacheMutex);
+
+    if (!m_cachedKeys.insert(Key).second || !m_cacheFile.is_open())
+      return;
+
+    D3D9BytecodeCacheEntryHeader entry;
+    entry.stage      = ShaderStage;
+    entry.byteLength = ByteLength;
+    entry.hash       = Key.sha1();
+
+    m_cacheFile.write(reinterpret_cast<const char*>(&entry), sizeof(entry));
+    m_cacheFile.write(reinterpret_cast<const char*>(pShaderBytecode), ByteLength);
+    m_cacheFile.flush();
   }
 
 }
