@@ -54,6 +54,13 @@ typedef struct dxvk_present_tap_frame {
      * depth_layers (0 when there is none). Appended last, so older consumers that ignore them see layer 0. */
     uint32_t layers;
     uint32_t depth_layers;
+    /* The interface drawn on its own for the same frame, when the runtime named one (dxvk_present_tap_set_hud):
+     * one layer, 8-bit RGBA, transparent where there is no interface. hud_vk_image is 0 otherwise. Same slot,
+     * fence and release as the colour image. Appended last, as the layer counts were. */
+    uint64_t hud_vk_image;
+    uint32_t hud_width;
+    uint32_t hud_height;
+    uint32_t hud_vk_format;
 } dxvk_present_tap_frame;
 
 typedef void (*dxvk_present_tap_fn)(void *user, const dxvk_present_tap_frame *frame);
@@ -69,6 +76,9 @@ int dxvk_present_tap_ready(void *state, uint64_t frame_id);
 /* The D3D9 surface (IDirect3DSurface9 *) holding the scene's depth for the next Present, or NULL. It must stay
  * alive until that Present returns; the runtime sets it right before each Present and clears it after. */
 void dxvk_present_tap_set_depth(void *surface);
+/* The D3D9 surface (IDirect3DSurface9 *, an 8-bit RGBA render target) holding the interface for the next Present,
+ * drawn there instead of into the back buffer, or NULL. Same lifetime rule as set_depth. */
+void dxvk_present_tap_set_hud(void *surface);
 /* 1 while the immersive layer is running (tap-only presents), 0 otherwise. Thread-safe; takes effect at the
  * next Present. Off by default. */
 void dxvk_present_tap_set_exclusive(int on);
