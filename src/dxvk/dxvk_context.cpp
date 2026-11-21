@@ -2239,6 +2239,37 @@ namespace dxvk {
   }
 
 
+  void DxvkContext::replaceBuffer(
+    const Rc<DxvkBuffer>&           buffer,
+    const DxvkBufferSlice&          source) {
+    // Same reason as in updateBuffer: keep bound transform feedback counters intact
+    if (m_flags.test(DxvkContextFlag::GpXfbActive))
+      this->spillRenderPass(true);
+
+    DxvkBufferSliceHandle dstSlice = buffer->allocSlice();
+    this->invalidateBuffer(buffer, dstSlice);
+
+    DxvkBufferSliceHandle srcSlice = source.getSliceHandle();
+
+    VkBufferCopy region;
+    region.srcOffset = srcSlice.offset;
+    region.dstOffset = dstSlice.offset;
+    region.size      = std::min(srcSlice.length, dstSlice.length);
+
+    m_cmd->cmdCopyBuffer(DxvkCmdBuffer::InitBuffer,
+      srcSlice.handle, dstSlice.handle, 1, &region);
+
+    m_initBarriers.accessBuffer(dstSlice,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      buffer->info().stages,
+      buffer->info().access);
+
+    m_cmd->trackResource<DxvkAccess::Read>(source.buffer());
+    m_cmd->trackResource<DxvkAccess::Write>(buffer);
+  }
+
+
   void DxvkContext::updateBuffer(
     const Rc<DxvkBuffer>&           buffer,
           VkDeviceSize              offset,

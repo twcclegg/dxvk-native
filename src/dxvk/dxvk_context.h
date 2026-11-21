@@ -780,6 +780,19 @@ namespace dxvk {
             VkImageLayout             dstLayout);
     
     /**
+     * \brief Replaces the contents of a whole buffer
+     *
+     * Gives the buffer a new backing slice and fills it from \p source in
+     * the init command buffer, so that an active render pass stays open.
+     * Commands recorded earlier keep the old slice.
+     * \param [in] buffer Destination buffer
+     * \param [in] source Host-written slice with the buffer's full contents
+     */
+    void replaceBuffer(
+      const Rc<DxvkBuffer>&           buffer,
+      const DxvkBufferSlice&          source);
+
+    /**
      * \brief Updates a buffer
      * 
      * Copies data from the host into a buffer.

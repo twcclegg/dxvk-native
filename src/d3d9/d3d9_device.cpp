@@ -1565,8 +1565,11 @@ namespace dxvk {
       VkOffset3D         offset,
       VkExtent3D         extent) {
       // Clear depth if we need to.
-      if (depthAspectMask != 0)
-        ClearImageView(alignment, offset, extent, m_state.depthStencil->GetDepthStencilView(), depthAspectMask, clearValueDepth);
+      if (depthAspectMask != 0) {
+        Rc<DxvkImageView> shadowDepth = ShadowDepthView();
+        ClearImageView(alignment, offset, extent, shadowDepth != nullptr ? shadowDepth : m_state.depthStencil->GetDepthStencilView(),
+          depthAspectMask, clearValueDepth);
+      }
 
       // Clear render targets if we need to.
       if (Flags & D3DCLEAR_TARGET) {
@@ -4792,6 +4795,35 @@ namespace dxvk {
 
     D3D9Range& range = pResource->DirtyRange();
 
+    // Apple port, LB_RP_UPLOAD=1: a copy into the buffer must end the active render pass, and every pass end
+    // stores and reloads all attachments (two-layer RGBA16F and D32S8 in stereo; ~100 per frame in a Skyrim
+    // boss fight). Instead, rename the whole buffer and fill it from a snapshot of the mapping buffer, which
+    // holds the full contents unless the GPU wrote the buffer. LB_RP_UPLOAD_MAX caps the snapshot size.
+    static const VkDeviceSize s_uploadMax = [] () -> VkDeviceSize {
+      const char* e = std::getenv("LB_RP_UPLOAD");
+      if (!e || !*e || *e == '0')
+        return 0;
+      const char* m = std::getenv("LB_RP_UPLOAD_MAX");
+      return m && *m ? VkDeviceSize(std::strtoull(m, nullptr, 10)) : VkDeviceSize(1u << 20);
+    }();
+
+    if (pResource->Desc()->Size <= s_uploadMax && !pResource->WasWrittenByGPU()) {
+      const VkDeviceSize size = pResource->Desc()->Size;
+      D3D9BufferSlice slice = AllocTempBuffer<false>(size);
+      memcpy(slice.mapPtr, srcSlice.mapPtr, size);
+
+      EmitCs([
+        cBuffer = dstBuffer.buffer(),
+        cSource = slice.slice
+      ] (DxvkContext* ctx) {
+        ctx->replaceBuffer(cBuffer, cSource);
+      });
+
+      pResource->GPUReadingRange().Conjoin(range);
+      range.Clear();
+      return D3D_OK;
+    }
+
     DxvkBufferSlice copySrcSlice;
     if (pResource->DoesStagingBufferUploads()) {
       D3D9BufferSlice slice = AllocTempBuffer<false>(range.max - range.min);
@@ -5730,6 +5762,93 @@ namespace dxvk {
   }
 
 
+  // Skyrim draws its shadow maps (one-layer render targets of 512x512 or 512x1024) with the scene's
+  // depth-stencil surface bound, which is two-layer and 1600x1100 in stereo, and clears that surface
+  // before each cascade. Each pass then loads and stores the whole surface, and each partial clear
+  // needs a pass of its own. With LB_RP_SHADOW_DS=1, a pass whose colour targets are all one-layer and
+  // smaller than a two-layer depth-stencil surface uses a private surface of the colour targets' size
+  // instead, for drawing and for clears. The scene's surface keeps the contents it had; the shadow
+  // draws' depth is lost after the pass, so a game that reads it later draws wrong.
+  Rc<DxvkImageView> D3D9DeviceEx::ShadowDepthView() {
+    static const bool s_enabled = [] {
+      const char* e = std::getenv("LB_RP_SHADOW_DS");
+      return e && *e && *e != '0';
+    }();
+
+    if (!s_enabled || !IsStereoMultiview() || m_state.depthStencil == nullptr || !m_boundRTs)
+      return nullptr;
+
+    const DxvkImageCreateInfo& dsInfo = m_state.depthStencil->GetCommonTexture()->GetImage()->info();
+
+    if (dsInfo.numLayers != DxsoStereoViewCount || dsInfo.sampleCount != VK_SAMPLE_COUNT_1_BIT)
+      return nullptr;
+
+    VkExtent3D extent = { 0u, 0u, 1u };
+
+    for (uint32_t i : bit::BitMask(m_boundRTs)) {
+      const DxvkImageCreateInfo& rtInfo = m_state.renderTargets[i]->GetCommonTexture()->GetImage()->info();
+      const VkExtent3D rtExtent = m_state.renderTargets[i]->GetCommonTexture()->GetExtentMip(m_state.renderTargets[i]->GetSubresource());
+
+      if (m_state.renderTargets[i]->GetCommonTexture()->GetStereoLayers() != 1 || rtInfo.sampleCount != VK_SAMPLE_COUNT_1_BIT)
+        return nullptr;
+
+      if (extent.width && (extent.width != rtExtent.width || extent.height != rtExtent.height))
+        return nullptr;
+
+      extent = { rtExtent.width, rtExtent.height, 1u };
+    }
+
+    if (extent.width > dsInfo.extent.width || extent.height > dsInfo.extent.height
+     || (extent.width == dsInfo.extent.width && extent.height == dsInfo.extent.height))
+      return nullptr;
+
+    for (const auto& view : m_shadowDepthViews) {
+      const DxvkImageCreateInfo& info = view->image()->info();
+      if (info.extent.width == extent.width && info.extent.height == extent.height && info.format == dsInfo.format)
+        return view;
+    }
+
+    DxvkImageCreateInfo imageInfo = dsInfo;
+    imageInfo.extent    = extent;
+    imageInfo.numLayers = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.flags     = 0;
+    imageInfo.shared    = VK_FALSE;
+    imageInfo.usage     = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    imageInfo.stages    = VK_PIPELINE_STAGE_TRANSFER_BIT
+                        | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                        | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    imageInfo.access    = VK_ACCESS_TRANSFER_WRITE_BIT
+                        | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                        | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    imageInfo.tiling    = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.layout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    imageInfo.viewFormatCount = 0;
+    imageInfo.viewFormats     = nullptr;
+
+    Rc<DxvkImage> image = m_dxvkDevice->createImage(imageInfo, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    DxvkImageViewCreateInfo viewInfo;
+    viewInfo.type      = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format    = imageInfo.format;
+    viewInfo.usage     = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    viewInfo.aspect    = imageFormatInfo(imageInfo.format)->aspectMask;
+    viewInfo.minLevel  = 0;
+    viewInfo.numLevels = 1;
+    viewInfo.minLayer  = 0;
+    viewInfo.numLayers = 1;
+
+    Rc<DxvkImageView> view = m_dxvkDevice->createImageView(image, viewInfo);
+
+    EmitCs([cImage = image, cAspect = viewInfo.aspect] (DxvkContext* ctx) {
+      ctx->initImage(cImage, VkImageSubresourceRange { cAspect, 0, 1, 0, 1 }, VK_IMAGE_LAYOUT_UNDEFINED);
+    });
+
+    m_shadowDepthViews.push_back(view);
+    return view;
+  }
+
+
   void D3D9DeviceEx::BindFramebuffer() {
     m_flags.clr(D3D9DeviceFlag::DirtyFramebuffer);
 
@@ -5755,7 +5874,11 @@ namespace dxvk {
         m_state.renderTargets[i]->GetRenderTargetLayout() };
     }
 
-    if (m_state.depthStencil != nullptr) {
+    Rc<DxvkImageView> shadowDepth = ShadowDepthView();
+
+    if (shadowDepth != nullptr) {
+      attachments.depth = { shadowDepth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+    } else if (m_state.depthStencil != nullptr) {
       const DxvkImageCreateInfo& dsImageInfo = m_state.depthStencil->GetCommonTexture()->GetImage()->info();
       const bool depthWrite = m_state.renderStates[D3DRS_ZWRITEENABLE];
 

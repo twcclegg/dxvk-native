@@ -792,6 +792,10 @@ namespace dxvk {
 
     void BindFramebuffer();
 
+    /* Apple port, LB_RP_SHADOW_DS=1: see D3D9DeviceEx::ShadowDepthView. */
+    Rc<DxvkImageView> ShadowDepthView();
+    std::vector<Rc<DxvkImageView>>  m_shadowDepthViews;
+
     void BindViewportAndScissor();
 
     inline bool IsAlphaToCoverageEnabled() {
