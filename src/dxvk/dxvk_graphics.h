@@ -17,6 +17,33 @@
 namespace dxvk {
 
   struct DxvkStateCacheKey;
+
+  /**
+   * \brief Pipeline state normalization (Apple port)
+   *
+   * On unless \c DXVK_PIPELINE_NORMALIZE=0: pipelines are looked up,
+   * compiled and written to the state cache with the state that Vulkan
+   * ignores cleared (see \c dxvkNormalizePipelineState), so draws and cache
+   * entries that differ only there share one pipeline.
+   */
+  bool dxvkPipelineNormalizeEnabled();
+
+  /**
+   * \brief Clears pipeline state that cannot change the pipeline
+   *
+   * Blend and swizzle state of colour attachments the fragment shader does
+   * not write or the pass lacks, blend factors and ops with blending off,
+   * depth state without a depth attachment, depth compare and write with
+   * the depth test off, stencil ops with the stencil test off, and the logic
+   * op with logic ops off.
+   * \param [in,out] state Pipeline state
+   * \param [in] format Render pass format
+   * \param [in] fsOutMask Colour outputs the fragment shader writes
+   */
+  void dxvkNormalizePipelineState(
+          DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPassFormat&          format,
+          uint32_t                       fsOutMask);
   
   class DxvkDevice;
   class DxvkPipelineManager;
@@ -268,6 +295,11 @@ namespace dxvk {
             bool                           trusted) const;
     
     DxvkStateCacheKey getStateCacheKey() const;
+
+    const DxvkGraphicsPipelineStateInfo& normalizeState(
+      const DxvkGraphicsPipelineStateInfo& state,
+      const DxvkRenderPass*                renderPass,
+            DxvkGraphicsPipelineStateInfo& scratch) const;
 
     bool writePipelineStateToCache(
       const DxvkGraphicsPipelineStateInfo& state,

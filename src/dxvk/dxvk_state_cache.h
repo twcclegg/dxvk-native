@@ -58,7 +58,8 @@ namespace dxvk {
     bool addGraphicsPipeline(
       const DxvkStateCacheKey&              shaders,
       const DxvkGraphicsPipelineStateInfo&  state,
-      const DxvkRenderPassFormat&           format);
+      const DxvkRenderPassFormat&           format,
+            uint32_t                        fsOutMask = ~0u);
 
     /**
      * Adds a compute pipeline to the cache
@@ -108,7 +109,8 @@ namespace dxvk {
     std::string describeMiss(
       const DxvkStateCacheKey&              shaders,
       const DxvkGraphicsPipelineStateInfo&  state,
-      const DxvkRenderPassFormat&           format);
+      const DxvkRenderPassFormat&           format,
+            uint32_t                        fsOutMask);
 
     /**
      * \brief Field-by-field view of an at-draw compile (LB_PIPE_LOG=2)

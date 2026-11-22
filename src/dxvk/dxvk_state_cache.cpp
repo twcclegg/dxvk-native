@@ -42,6 +42,15 @@ namespace dxvk {
     return fnv32(words, sizeof(words));
   }
 
+  // An entry's state as the pipeline compiles it when replayed (DXVK_PIPELINE_NORMALIZE)
+  static void effectiveEntry(
+          DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPassFormat&          format,
+          uint32_t                       fsOutMask) {
+    if (dxvkPipelineNormalizeEnabled())
+      dxvkNormalizePipelineState(state, format, fsOutMask);
+  }
+
   static std::string shortKey(const DxvkShaderKey& key) {
     return key.eq(g_nullShaderKey) ? std::string("-") : key.sha1().toString().substr(0, 8);
   }
@@ -261,7 +270,8 @@ namespace dxvk {
   bool DxvkStateCache::addGraphicsPipeline(
     const DxvkStateCacheKey&              shaders,
     const DxvkGraphicsPipelineStateInfo&  state,
-    const DxvkRenderPassFormat&           format) {
+    const DxvkRenderPassFormat&           format,
+          uint32_t                        fsOutMask) {
     if (shaders.vs.eq(g_nullShaderKey))
       return false;
     
@@ -270,8 +280,13 @@ namespace dxvk {
 
     for (auto e = entries.first; e != entries.second; e++) {
       const DxvkStateCacheEntry& entry = m_entries[e->second];
+      if (!entry.format.eq(format))
+        continue;
 
-      if (entry.format.eq(format) && entry.gpState == state)
+      DxvkGraphicsPipelineStateInfo entryState = entry.gpState;
+      effectiveEntry(entryState, entry.format, fsOutMask);
+
+      if (entryState == state)
         return false;
     }
 
@@ -351,7 +366,8 @@ namespace dxvk {
   std::string DxvkStateCache::describeMiss(
     const DxvkStateCacheKey&              shaders,
     const DxvkGraphicsPipelineStateInfo&  state,
-    const DxvkRenderPassFormat&           format) {
+    const DxvkRenderPassFormat&           format,
+          uint32_t                        fsOutMask) {
     // m_entries and m_entryMap are only written while reading the file in the constructor
     auto entries = m_entryMap.equal_range(shaders);
 
@@ -364,7 +380,8 @@ namespace dxvk {
     };
 
     for (auto e = entries.first; e != entries.second; e++) {
-      const DxvkStateCacheEntry& entry = m_entries[e->second];
+      DxvkStateCacheEntry entry = m_entries[e->second];
+      effectiveEntry(entry.gpState, entry.format, fsOutMask);
       const DxvkGraphicsPipelineStateInfo& c = entry.gpState;
       count += 1;
 
@@ -482,7 +499,8 @@ namespace dxvk {
    * marked "dc" when it cannot change the pipeline Vulkan builds: blend factors and ops of an attachment with
    * blending off in both, any blend or swizzle state of an attachment the fragment shader doesn't write or
    * the pass doesn't have, depth compare and write with the depth test off (Vulkan skips depth writes then)
-   * or no depth attachment, stencil ops with the stencil test off, and the logic op with logic ops off. */
+   * or no depth attachment, stencil ops with the stencil test off, and the logic op with logic ops off: the
+   * state dxvkNormalizePipelineState clears. */
   namespace {
 
     struct StateDiff {
@@ -645,7 +663,8 @@ namespace dxvk {
     uint32_t            count = 0;
 
     for (auto e = entries.first; e != entries.second; e++) {
-      const DxvkStateCacheEntry& entry = m_entries[e->second];
+      DxvkStateCacheEntry entry = m_entries[e->second];
+      effectiveEntry(entry.gpState, entry.format, fsOutMask);
       StateDiff diff = diffState(entry.gpState, entry.format, state, format, fsOutMask);
       count += 1;
 

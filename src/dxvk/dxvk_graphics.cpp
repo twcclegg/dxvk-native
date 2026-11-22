@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "../util/util_time.h"
 
@@ -76,9 +77,70 @@ namespace dxvk {
   }
 
 
-  VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
+  bool dxvkPipelineNormalizeEnabled() {
+    static const bool on = env::getEnvVar("DXVK_PIPELINE_NORMALIZE") != "0";
+    return on;
+  }
+
+
+  void dxvkNormalizePipelineState(
+          DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPassFormat&          format,
+          uint32_t                       fsOutMask) {
+    // Colour attachments: no blend or swizzle state where the fragment shader writes nothing or the pass has
+    // no attachment (createPipeline then writes nothing there), no factors or ops where blending is off
+    for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+      if (!(fsOutMask & (1u << i)) || format.color[i].format == VK_FORMAT_UNDEFINED) {
+        std::memset(&state.omBlend[i], 0, sizeof(state.omBlend[i]));
+        std::memset(&state.omSwizzle[i], 0, sizeof(state.omSwizzle[i]));
+      } else if (!state.omBlend[i].blendEnable()) {
+        state.omBlend[i] = DxvkOmAttachmentBlend(VK_FALSE,
+          VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+          VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
+          state.omBlend[i].colorWriteMask());
+      }
+    }
+
+    // Depth and stencil: nothing without a depth-stencil attachment; with the depth test off Vulkan neither
+    // compares nor writes depth; stencil ops only matter with the stencil test on
+    if (format.depth.format == VK_FORMAT_UNDEFINED) {
+      state.ds = DxvkDsInfo(VK_FALSE, VK_FALSE, VK_FALSE, VK_FALSE, VK_COMPARE_OP_NEVER);
+    } else if (!state.ds.enableDepthTest()) {
+      state.ds = DxvkDsInfo(VK_FALSE, VK_FALSE,
+        state.ds.enableDepthBoundsTest(), state.ds.enableStencilTest(), VK_COMPARE_OP_NEVER);
+    }
+
+    if (!state.ds.enableStencilTest()) {
+      std::memset(&state.dsFront, 0, sizeof(state.dsFront));
+      std::memset(&state.dsBack,  0, sizeof(state.dsBack));
+    }
+
+    if (!state.om.enableLogicOp())
+      state.om = DxvkOmInfo(VK_FALSE, VkLogicOp(0));
+  }
+
+
+  const DxvkGraphicsPipelineStateInfo& DxvkGraphicsPipeline::normalizeState(
     const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPass*                renderPass,
+          DxvkGraphicsPipelineStateInfo& scratch) const {
+    if (!dxvkPipelineNormalizeEnabled())
+      return state;
+
+    scratch = state;
+    dxvkNormalizePipelineState(scratch, renderPass->format(), m_fsOut);
+    return scratch;
+  }
+
+
+  VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
+    const DxvkGraphicsPipelineStateInfo& stateIn,
     const DxvkRenderPass*                renderPass) {
+    // Apple port: pipelines are looked up, compiled and cached by their normalized state
+    // (DXVK_PIPELINE_NORMALIZE), so draws that differ only in state Vulkan ignores share one
+    DxvkGraphicsPipelineStateInfo scratch;
+    const DxvkGraphicsPipelineStateInfo& state = this->normalizeState(stateIn, renderPass, scratch);
+
     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
 
     if (unlikely(!instance)) {
@@ -120,8 +182,12 @@ namespace dxvk {
 
 
   void DxvkGraphicsPipeline::compilePipeline(
-    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkGraphicsPipelineStateInfo& stateIn,
     const DxvkRenderPass*                renderPass) {
+    // Cache entries written before normalization (or by a build without it) compile in normalized form too
+    DxvkGraphicsPipelineStateInfo scratch;
+    const DxvkGraphicsPipelineStateInfo& state = this->normalizeState(stateIn, renderPass, scratch);
+
     // Exit early if the state vector is invalid
     if (!this->validatePipelineState(state, false))
       return;
@@ -643,7 +709,7 @@ namespace dxvk {
     if (m_pipeMgr->m_stateCache == nullptr)
       return false;
     
-    return m_pipeMgr->m_stateCache->addGraphicsPipeline(getStateCacheKey(), state, format);
+    return m_pipeMgr->m_stateCache->addGraphicsPipeline(getStateCacheKey(), state, format, m_fsOut);
   }
   
   
@@ -653,7 +719,7 @@ namespace dxvk {
     if (m_pipeMgr->m_stateCache == nullptr)
       return "cache: off";
 
-    return m_pipeMgr->m_stateCache->describeMiss(getStateCacheKey(), state, format);
+    return m_pipeMgr->m_stateCache->describeMiss(getStateCacheKey(), state, format, m_fsOut);
   }
 
 
