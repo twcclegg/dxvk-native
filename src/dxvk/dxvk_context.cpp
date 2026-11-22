@@ -2246,8 +2246,24 @@ namespace dxvk {
     if (m_flags.test(DxvkContextFlag::GpXfbActive))
       this->spillRenderPass(true);
 
-    DxvkBufferSliceHandle dstSlice = buffer->allocSlice();
-    this->invalidateBuffer(buffer, dstSlice);
+    // Without an open render pass a copy into the current slice costs no pass end, and a rename
+    // would only allocate another slice (most uploads happen while a level loads).
+    if (!m_flags.test(DxvkContextFlag::GpRenderPassBound)) {
+      this->copyBuffer(buffer, 0, source.buffer(), source.offset(),
+        std::min<VkDeviceSize>(source.length(), buffer->info().size));
+      return;
+    }
+
+    // A buffer that nothing recorded or in flight uses can be filled in place, which is the
+    // common case while a level loads; otherwise earlier draws must keep their slice.
+    DxvkBufferSliceHandle dstSlice;
+
+    if (buffer->isInUse()) {
+      dstSlice = buffer->allocSlice();
+      this->invalidateBuffer(buffer, dstSlice);
+    } else {
+      dstSlice = buffer->getSliceHandle();
+    }
 
     DxvkBufferSliceHandle srcSlice = source.getSliceHandle();
 

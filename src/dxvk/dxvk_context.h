@@ -782,9 +782,10 @@ namespace dxvk {
     /**
      * \brief Replaces the contents of a whole buffer
      *
-     * Gives the buffer a new backing slice and fills it from \p source in
-     * the init command buffer, so that an active render pass stays open.
-     * Commands recorded earlier keep the old slice.
+     * While a render pass is open, gives the buffer a new backing slice and
+     * fills it from \p source in the init command buffer, so that the pass
+     * stays open; commands recorded earlier keep the old slice. Otherwise
+     * copies \p source into the current slice.
      * \param [in] buffer Destination buffer
      * \param [in] source Host-written slice with the buffer's full contents
      */
