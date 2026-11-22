@@ -6,10 +6,12 @@
 
 #include "../dxvk/dxvk_hash.h"
 #include "../dxvk/dxvk_spec_const.h"
+#include "../dxvk/dxvk_state_cache.h"
 
 #include "../spirv/spirv_module.h"
 
 #include <cfloat>
+#include <cstdio>
 
 namespace dxvk {
 
@@ -2326,6 +2328,10 @@ namespace dxvk {
 
     m_shader->setShaderKey(shaderKey);
     pDevice->GetDXVKDevice()->registerShader(m_shader);
+
+    // LB_PIPE_LOG=2: fixed-function shaders are made at draw time, never from the bytecode cache
+    if (dxvkPipeLogLevel() >= 2)
+      std::fprintf(stderr, "ff shader created: vs %s\n", hash.toString().substr(0, 8).c_str());
   }
 
 
@@ -2349,6 +2355,10 @@ namespace dxvk {
 
     m_shader->setShaderKey(shaderKey);
     pDevice->GetDXVKDevice()->registerShader(m_shader);
+
+    // LB_PIPE_LOG=2: fixed-function shaders are made at draw time, never from the bytecode cache
+    if (dxvkPipeLogLevel() >= 2)
+      std::fprintf(stderr, "ff shader created: fs %s\n", hash.toString().substr(0, 8).c_str());
   }
 
   template <typename T>

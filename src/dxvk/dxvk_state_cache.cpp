@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -9,6 +10,41 @@ namespace dxvk {
 
   static const Sha1Hash       g_nullHash      = Sha1Hash::compute(nullptr, 0);
   static const DxvkShaderKey  g_nullShaderKey = DxvkShaderKey();
+
+
+  uint32_t dxvkPipeLogLevel() {
+    static const uint32_t level = [] {
+      std::string e = env::getEnvVar("LB_PIPE_LOG");
+      return e.empty() || e[0] < '0' || e[0] > '9' ? 0u : uint32_t(e[0] - '0');
+    }();
+    return level;
+  }
+
+
+  // FNV-1a, so keys printed by different launches compare equal
+  static uint32_t fnv32(const void* data, size_t size, uint32_t h = 2166136261u) {
+    auto bytes = reinterpret_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < size; i++)
+      h = (h ^ bytes[i]) * 16777619u;
+    return h;
+  }
+
+  static uint32_t formatHash32(const DxvkRenderPassFormat& f) {
+    uint32_t words[3 + 2 * MaxNumRenderTargets];
+    uint32_t n = 0;
+    words[n++] = uint32_t(f.sampleCount);
+    words[n++] = f.viewMask;
+    words[n++] = uint32_t(f.depth.format) ^ (uint32_t(f.depth.layout) << 16);
+    for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+      words[n++] = uint32_t(f.color[i].format);
+      words[n++] = uint32_t(f.color[i].layout);
+    }
+    return fnv32(words, sizeof(words));
+  }
+
+  static std::string shortKey(const DxvkShaderKey& key) {
+    return key.eq(g_nullShaderKey) ? std::string("-") : key.sha1().toString().substr(0, 8);
+  }
 
 
   /**
@@ -222,12 +258,12 @@ namespace dxvk {
   }
 
 
-  void DxvkStateCache::addGraphicsPipeline(
+  bool DxvkStateCache::addGraphicsPipeline(
     const DxvkStateCacheKey&              shaders,
     const DxvkGraphicsPipelineStateInfo&  state,
     const DxvkRenderPassFormat&           format) {
     if (shaders.vs.eq(g_nullShaderKey))
-      return;
+      return false;
     
     // Do not add an entry that is already in the cache
     auto entries = m_entryMap.equal_range(shaders);
@@ -236,7 +272,7 @@ namespace dxvk {
       const DxvkStateCacheEntry& entry = m_entries[e->second];
 
       if (entry.format.eq(format) && entry.gpState == state)
-        return;
+        return false;
     }
 
     // Queue a job to write this pipeline to the cache
@@ -246,6 +282,7 @@ namespace dxvk {
       DxvkComputePipelineStateInfo(),
       format, g_nullHash });
     m_writerCond.notify_one();
+    return true;
   }
 
 
@@ -426,6 +463,207 @@ namespace dxvk {
       return str::format("cache: exact of ", count, " (", where, ")");
 
     return str::format("cache: differs of ", count, " [", bestText, "] (", where, ")");
+  }
+
+
+  std::string DxvkStateCache::pipelineKey(
+    const DxvkStateCacheKey&              shaders,
+    const DxvkGraphicsPipelineStateInfo&  state,
+    const DxvkRenderPassFormat&           format) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%s.%s.%08x.%08x",
+      shortKey(shaders.vs).c_str(), shortKey(shaders.fs).c_str(),
+      fnv32(&state, sizeof(state)), formatHash32(format));
+    return buf;
+  }
+
+
+  /* Field-by-field difference between a cache entry (a) and a pipeline (b), for LB_PIPE_LOG=2. A field is
+   * marked "dc" when it cannot change the pipeline Vulkan builds: blend factors and ops of an attachment with
+   * blending off in both, any blend or swizzle state of an attachment the fragment shader doesn't write or
+   * the pass doesn't have, depth compare and write with the depth test off (Vulkan skips depth writes then)
+   * or no depth attachment, stencil ops with the stencil test off, and the logic op with logic ops off. */
+  namespace {
+
+    struct StateDiff {
+      std::string text;
+      uint32_t    all  = 0;
+      uint32_t    real = 0;
+
+      void add(const char* name, uint32_t a, uint32_t b, bool dc) {
+        if (a == b)
+          return;
+
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%s%s %x->%x%s", all ? "," : "", name, a, b, dc ? " dc" : "");
+        text += buf;
+        all  += 1;
+        real += dc ? 0 : 1;
+      }
+
+      void add(const std::string& name, uint32_t a, uint32_t b, bool dc) {
+        add(name.c_str(), a, b, dc);
+      }
+    };
+
+    const char* specConstantName(uint32_t i) {
+      // D3D9SpecConstantId (d3d9_spec_constants.h); the D3D11 front end uses none
+      static const char* names[] = {
+        "alphaOp", "samplerType", "fogEnabled", "vsFogMode", "psFogMode", "pointMode", "projection",
+        "vsBools", "psBools", "fetch4", "depthMode", "vsScale", "depthFilter" };
+      return i < sizeof(names) / sizeof(names[0]) ? names[i] : "sc";
+    }
+
+    StateDiff diffState(
+      const DxvkGraphicsPipelineStateInfo& a, const DxvkRenderPassFormat& fa,
+      const DxvkGraphicsPipelineStateInfo& b, const DxvkRenderPassFormat& fb,
+            uint32_t                       fsOutMask) {
+      StateDiff d;
+
+      // Render pass
+      d.add("samples", fa.sampleCount, fb.sampleCount, false);
+      d.add("viewMask", fa.viewMask, fb.viewMask, false);
+      d.add("depthFmt", fa.depth.format, fb.depth.format, false);
+      d.add("depthLayout", fa.depth.layout, fb.depth.layout, false);
+
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+        d.add(str::format("rt", i, "Fmt"), fa.color[i].format, fb.color[i].format, false);
+        d.add(str::format("rt", i, "Layout"), fa.color[i].layout, fb.color[i].layout, false);
+      }
+
+      // Resources, input assembly, vertex input
+      if (std::memcmp(&a.bsBindingMask, &b.bsBindingMask, sizeof(a.bsBindingMask)))
+        d.add("bindingMask", 0, 1, false);
+
+      d.add("topology", a.ia.primitiveTopology(), b.ia.primitiveTopology(), false);
+      d.add("restart", a.ia.primitiveRestart(), b.ia.primitiveRestart(), false);
+      d.add("patchVerts", a.ia.patchVertexCount(), b.ia.patchVertexCount(), false);
+      d.add("attrCount", a.il.attributeCount(), b.il.attributeCount(), false);
+      d.add("bindCount", a.il.bindingCount(), b.il.bindingCount(), false);
+
+      for (uint32_t i = 0; i < std::max(a.il.attributeCount(), b.il.attributeCount()); i++) {
+        const auto& x = a.ilAttributes[i];
+        const auto& y = b.ilAttributes[i];
+        d.add(str::format("attr", i, ".loc"), x.location(), y.location(), false);
+        d.add(str::format("attr", i, ".bind"), x.binding(), y.binding(), false);
+        d.add(str::format("attr", i, ".fmt"), x.format(), y.format(), false);
+        d.add(str::format("attr", i, ".offset"), x.offset(), y.offset(), false);
+      }
+
+      for (uint32_t i = 0; i < std::max(a.il.bindingCount(), b.il.bindingCount()); i++) {
+        const auto& x = a.ilBindings[i];
+        const auto& y = b.ilBindings[i];
+        d.add(str::format("vb", i, ".bind"), x.binding(), y.binding(), false);
+        d.add(str::format("vb", i, ".stride"), x.stride(), y.stride(), false);
+        d.add(str::format("vb", i, ".rate"), x.inputRate(), y.inputRate(), false);
+        d.add(str::format("vb", i, ".divisor"), x.divisor(), y.divisor(), false);
+      }
+
+      // Rasterizer, multisample
+      d.add("depthClip", a.rs.depthClipEnable(), b.rs.depthClipEnable(), false);
+      d.add("depthBias", a.rs.depthBiasEnable(), b.rs.depthBiasEnable(), false);
+      d.add("polygonMode", a.rs.polygonMode(), b.rs.polygonMode(), false);
+      d.add("cullMode", a.rs.cullMode(), b.rs.cullMode(), false);
+      d.add("frontFace", a.rs.frontFace(), b.rs.frontFace(), false);
+      d.add("viewports", a.rs.viewportCount(), b.rs.viewportCount(), false);
+      d.add("rsSamples", a.rs.sampleCount(), b.rs.sampleCount(), false);
+      d.add("conservative", a.rs.conservativeMode(), b.rs.conservativeMode(), false);
+      d.add("msSamples", a.ms.sampleCount(), b.ms.sampleCount(), false);
+      d.add("sampleMask", a.ms.sampleMask(), b.ms.sampleMask(), false);
+      d.add("alphaToCoverage", a.ms.enableAlphaToCoverage(), b.ms.enableAlphaToCoverage(), false);
+
+      // Depth and stencil
+      const bool noDepth   = fa.depth.format == VK_FORMAT_UNDEFINED && fb.depth.format == VK_FORMAT_UNDEFINED;
+      const bool depthOff  = noDepth || (!a.ds.enableDepthTest() && !b.ds.enableDepthTest());
+      const bool stenOff   = noDepth || (!a.ds.enableStencilTest() && !b.ds.enableStencilTest());
+      d.add("depthTest", a.ds.enableDepthTest(), b.ds.enableDepthTest(), noDepth);
+      d.add("depthWrite", a.ds.enableDepthWrite(), b.ds.enableDepthWrite(), depthOff);
+      d.add("depthOp", a.ds.depthCompareOp(), b.ds.depthCompareOp(), depthOff);
+      d.add("depthBounds", a.ds.enableDepthBoundsTest(), b.ds.enableDepthBoundsTest(), noDepth);
+      d.add("stencilTest", a.ds.enableStencilTest(), b.ds.enableStencilTest(), noDepth);
+
+      for (uint32_t face = 0; face < 2; face++) {
+        VkStencilOpState x = (face ? a.dsBack : a.dsFront).state();
+        VkStencilOpState y = (face ? b.dsBack : b.dsFront).state();
+        const char* f = face ? "back" : "front";
+        d.add(str::format(f, ".fail"), x.failOp, y.failOp, stenOff);
+        d.add(str::format(f, ".pass"), x.passOp, y.passOp, stenOff);
+        d.add(str::format(f, ".depthFail"), x.depthFailOp, y.depthFailOp, stenOff);
+        d.add(str::format(f, ".op"), x.compareOp, y.compareOp, stenOff);
+        d.add(str::format(f, ".readMask"), x.compareMask, y.compareMask, stenOff);
+        d.add(str::format(f, ".writeMask"), x.writeMask, y.writeMask, stenOff);
+      }
+
+      // Output merger
+      d.add("logicOpEnable", a.om.enableLogicOp(), b.om.enableLogicOp(), false);
+      d.add("logicOp", a.om.logicOp(), b.om.logicOp(),
+        !a.om.enableLogicOp() && !b.om.enableLogicOp());
+
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+        const auto& x = a.omBlend[i];
+        const auto& y = b.omBlend[i];
+        const bool unused  = !(fsOutMask & (1u << i))
+          || (fa.color[i].format == VK_FORMAT_UNDEFINED && fb.color[i].format == VK_FORMAT_UNDEFINED);
+        const bool noBlend = unused || (!x.blendEnable() && !y.blendEnable());
+        d.add(str::format("rt", i, ".blend"), x.blendEnable(), y.blendEnable(), unused);
+        d.add(str::format("rt", i, ".srcColor"), x.srcColorBlendFactor(), y.srcColorBlendFactor(), noBlend);
+        d.add(str::format("rt", i, ".dstColor"), x.dstColorBlendFactor(), y.dstColorBlendFactor(), noBlend);
+        d.add(str::format("rt", i, ".colorOp"), x.colorBlendOp(), y.colorBlendOp(), noBlend);
+        d.add(str::format("rt", i, ".srcAlpha"), x.srcAlphaBlendFactor(), y.srcAlphaBlendFactor(), noBlend);
+        d.add(str::format("rt", i, ".dstAlpha"), x.dstAlphaBlendFactor(), y.dstAlphaBlendFactor(), noBlend);
+        d.add(str::format("rt", i, ".alphaOp"), x.alphaBlendOp(), y.alphaBlendOp(), noBlend);
+        d.add(str::format("rt", i, ".writeMask"), x.colorWriteMask(), y.colorWriteMask(), unused);
+
+        const auto& p = a.omSwizzle[i];
+        const auto& q = b.omSwizzle[i];
+        d.add(str::format("rt", i, ".swizzle"),
+          p.rIndex() | p.gIndex() << 4 | p.bIndex() << 8 | p.aIndex() << 12,
+          q.rIndex() | q.gIndex() << 4 | q.bIndex() << 8 | q.aIndex() << 12, unused);
+      }
+
+      // Specialization constants
+      for (uint32_t i = 0; i < MaxNumSpecConstants; i++)
+        d.add(str::format("sc", i, ".", specConstantName(i)), a.sc.specConstants[i], b.sc.specConstants[i], false);
+
+      return d;
+    }
+
+  }
+
+
+  std::string DxvkStateCache::describeMissFields(
+    const DxvkStateCacheKey&              shaders,
+    const DxvkGraphicsPipelineStateInfo&  state,
+    const DxvkRenderPassFormat&           format,
+          uint32_t                        fsOutMask) {
+    std::string key = pipelineKey(shaders, state, format);
+    auto entries = m_entryMap.equal_range(shaders);
+
+    DxvkStateCacheEntry best;
+    StateDiff           bestDiff;
+    bool                hasBest = false;
+    uint32_t            count = 0;
+
+    for (auto e = entries.first; e != entries.second; e++) {
+      const DxvkStateCacheEntry& entry = m_entries[e->second];
+      StateDiff diff = diffState(entry.gpState, entry.format, state, format, fsOutMask);
+      count += 1;
+
+      if (!hasBest || diff.real < bestDiff.real || (diff.real == bestDiff.real && diff.all < bestDiff.all)) {
+        hasBest  = true;
+        best     = entry;
+        bestDiff = std::move(diff);
+      }
+    }
+
+    if (!hasBest) {
+      return str::format("pipe miss: key ", key, " near none (vs in ", m_pipelineMap.count(shaders.vs),
+        ", fs in ", m_pipelineMap.count(shaders.fs), " entries)");
+    }
+
+    const char* kind = bestDiff.all == 0 ? "exact" : bestDiff.real == 0 ? "dc-only" : "real";
+    return str::format("pipe miss: key ", key, " near ", pipelineKey(best.shaders, best.gpState, best.format),
+      " of ", count, " ", kind, " [", bestDiff.text, "]");
   }
 
 
@@ -1098,6 +1336,23 @@ namespace dxvk {
       }
 
       compilePipelines(item);
+
+      // LB_PIPE_LOG=2: when the queue runs dry, so the log shows whether the replay of the cache
+      // finished before play started (the line lands among the frame lines)
+      if (dxvkPipeLogLevel() >= 2) {
+        uint32_t items = m_itemsSinceDrain.fetch_add(1) + 1;
+        bool drained;
+
+        { std::lock_guard<dxvk::mutex> lock(m_workerLock);
+          drained = m_workerQueue.empty();
+        }
+
+        if (drained && m_itemsSinceDrain.compare_exchange_strong(items, 0u)) {
+          double ms = std::chrono::duration<double, std::milli>(high_resolution_clock::now() - m_startTime).count();
+          std::fprintf(stderr, "pipe cache drained: %u shader sets since the last drain, %.0f ms after start\n",
+            items, ms);
+        }
+      }
     }
   }
 
@@ -1131,6 +1386,11 @@ namespace dxvk {
       }
 
       writeCacheEntry(file, entry);
+
+      if (dxvkPipeLogLevel() >= 2 && entry.shaders.cs.eq(g_nullShaderKey)) {
+        std::fprintf(stderr, "pipe cache wrote: %s\n",
+          pipelineKey(entry.shaders, entry.gpState, entry.format).c_str());
+      }
     }
   }
 

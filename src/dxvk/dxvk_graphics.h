@@ -15,6 +15,8 @@
 #include "dxvk_stats.h"
 
 namespace dxvk {
+
+  struct DxvkStateCacheKey;
   
   class DxvkDevice;
   class DxvkPipelineManager;
@@ -265,7 +267,9 @@ namespace dxvk {
       const DxvkGraphicsPipelineStateInfo& state,
             bool                           trusted) const;
     
-    void writePipelineStateToCache(
+    DxvkStateCacheKey getStateCacheKey() const;
+
+    bool writePipelineStateToCache(
       const DxvkGraphicsPipelineStateInfo& state,
       const DxvkRenderPassFormat&          format) const;
 

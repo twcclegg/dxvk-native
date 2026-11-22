@@ -68,8 +68,7 @@ namespace dxvk {
    * a draw waited for it ("at draw", on the CS thread) or the state cache's workers compiled it ahead. Lines land
    * between the frame-time lines of the frame they belong to, so hitches can be matched to compiles. */
   static bool pipeLogEnabled() {
-    static const bool on = [] { const char* e = std::getenv("LB_PIPE_LOG"); return e && *e == '1'; }();
-    return on;
+    return dxvkPipeLogLevel() >= 1;
   }
 
   static double pipeNowMs() {
@@ -101,7 +100,18 @@ namespace dxvk {
           std::fprintf(stderr, "pipe compiled at draw: %.1f ms %s\n", ms,
             this->describeCacheMiss(state, renderPass->format()).c_str());
         }
-        this->writePipelineStateToCache(state, renderPass->format());
+        bool queued = this->writePipelineStateToCache(state, renderPass->format());
+
+        // LB_PIPE_LOG=2: the pipeline's key, the closest cache entry field by field, and whether it was queued
+        // for writing to the cache file (it is not when an identical entry was read from the file)
+        if (dxvkPipeLogLevel() >= 2 && m_pipeMgr->m_stateCache != nullptr) {
+          size_t instances = 0;
+          for (const auto& i : m_pipelines) { (void) i; instances += 1; }
+
+          std::fprintf(stderr, "%s; %s; instances %zu\n",
+            m_pipeMgr->m_stateCache->describeMissFields(getStateCacheKey(), state, renderPass->format(), m_fsOut).c_str(),
+            queued ? "write queued" : "write skipped", instances);
+        }
       }
     }
 
@@ -616,20 +626,24 @@ namespace dxvk {
   }
   
   
-  void DxvkGraphicsPipeline::writePipelineStateToCache(
-    const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPassFormat&          format) const {
-    if (m_pipeMgr->m_stateCache == nullptr)
-      return;
-    
+  DxvkStateCacheKey DxvkGraphicsPipeline::getStateCacheKey() const {
     DxvkStateCacheKey key;
     if (m_shaders.vs  != nullptr) key.vs = m_shaders.vs->getShaderKey();
     if (m_shaders.tcs != nullptr) key.tcs = m_shaders.tcs->getShaderKey();
     if (m_shaders.tes != nullptr) key.tes = m_shaders.tes->getShaderKey();
     if (m_shaders.gs  != nullptr) key.gs = m_shaders.gs->getShaderKey();
     if (m_shaders.fs  != nullptr) key.fs = m_shaders.fs->getShaderKey();
+    return key;
+  }
 
-    m_pipeMgr->m_stateCache->addGraphicsPipeline(key, state, format);
+
+  bool DxvkGraphicsPipeline::writePipelineStateToCache(
+    const DxvkGraphicsPipelineStateInfo& state,
+    const DxvkRenderPassFormat&          format) const {
+    if (m_pipeMgr->m_stateCache == nullptr)
+      return false;
+    
+    return m_pipeMgr->m_stateCache->addGraphicsPipeline(getStateCacheKey(), state, format);
   }
   
   
@@ -639,14 +653,7 @@ namespace dxvk {
     if (m_pipeMgr->m_stateCache == nullptr)
       return "cache: off";
 
-    DxvkStateCacheKey key;
-    if (m_shaders.vs  != nullptr) key.vs = m_shaders.vs->getShaderKey();
-    if (m_shaders.tcs != nullptr) key.tcs = m_shaders.tcs->getShaderKey();
-    if (m_shaders.tes != nullptr) key.tes = m_shaders.tes->getShaderKey();
-    if (m_shaders.gs  != nullptr) key.gs = m_shaders.gs->getShaderKey();
-    if (m_shaders.fs  != nullptr) key.fs = m_shaders.fs->getShaderKey();
-
-    return m_pipeMgr->m_stateCache->describeMiss(key, state, format);
+    return m_pipeMgr->m_stateCache->describeMiss(getStateCacheKey(), state, format);
   }
 
 

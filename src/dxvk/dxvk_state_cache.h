@@ -18,6 +18,15 @@ namespace dxvk {
   class DxvkDevice;
 
   /**
+   * \brief Pipeline compile logging level (Apple port)
+   *
+   * \c LB_PIPE_LOG: 0 or unset off; 1 one stderr line per graphics pipeline
+   * compiled; 2 also the pipeline keys, a field-by-field diff against the
+   * closest cache entry, cache writes and when the compiler queue drains.
+   */
+  uint32_t dxvkPipeLogLevel();
+
+  /**
    * \brief State cache
    * 
    * The shader state cache stores state vectors and
@@ -46,7 +55,7 @@ namespace dxvk {
      * \param [in] state Graphics pipeline state
      * \param [in] format Render pass format
      */
-    void addGraphicsPipeline(
+    bool addGraphicsPipeline(
       const DxvkStateCacheKey&              shaders,
       const DxvkGraphicsPipelineStateInfo&  state,
       const DxvkRenderPassFormat&           format);
@@ -101,6 +110,34 @@ namespace dxvk {
       const DxvkGraphicsPipelineStateInfo&  state,
       const DxvkRenderPassFormat&           format);
 
+    /**
+     * \brief Field-by-field view of an at-draw compile (LB_PIPE_LOG=2)
+     *
+     * Apple port. One line: the pipeline's key (as \c pipelineKey), the
+     * key of the closest entry read from the file with the same shaders and
+     * every state field that differs from it as old->new, each field that
+     * cannot change the compiled pipeline marked "dc". With no such entry,
+     * the shaders' own keys and how many file entries use each.
+     * \param [in] fsOutMask Colour outputs the fragment shader writes
+     */
+    std::string describeMissFields(
+      const DxvkStateCacheKey&              shaders,
+      const DxvkGraphicsPipelineStateInfo&  state,
+      const DxvkRenderPassFormat&           format,
+            uint32_t                        fsOutMask);
+
+    /**
+     * \brief Short, run-independent key of a graphics pipeline
+     *
+     * Apple port, LB_PIPE_LOG=2: vertex and fragment shader hash prefixes,
+     * then 32-bit hashes of the state vector and of the render pass format,
+     * so logs of different launches can be matched up.
+     */
+    static std::string pipelineKey(
+      const DxvkStateCacheKey&              shaders,
+      const DxvkGraphicsPipelineStateInfo&  state,
+      const DxvkRenderPassFormat&           format);
+
   private:
 
     using WriterItem = DxvkStateCacheEntry;
@@ -135,6 +172,10 @@ namespace dxvk {
     std::unordered_map<
       DxvkShaderKey, high_resolution_clock::time_point,
       DxvkHash, DxvkEq> m_shaderTimes;
+
+    // Apple port (LB_PIPE_LOG=2): when the cache was created; worker items since the queue last drained
+    high_resolution_clock::time_point m_startTime = high_resolution_clock::now();
+    std::atomic<uint32_t>             m_itemsSinceDrain = { 0u };
 
     dxvk::mutex                       m_workerLock;
     dxvk::condition_variable          m_workerCond;
