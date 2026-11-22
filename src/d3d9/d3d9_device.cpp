@@ -4819,7 +4819,6 @@ namespace dxvk {
         ctx->replaceBuffer(cBuffer, cSource);
       });
 
-      pResource->GPUReadingRange().Conjoin(range);
       range.Clear();
       return D3D_OK;
     }
@@ -7604,6 +7603,8 @@ namespace dxvk {
 
 
   HRESULT D3D9DeviceEx::ResetState(D3DPRESENT_PARAMETERS* pPresentationParameters) {
+    m_shadowDepthViews.clear();
+
     if (!pPresentationParameters->EnableAutoDepthStencil)
       SetDepthStencilSurface(nullptr);
 
