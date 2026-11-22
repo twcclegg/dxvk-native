@@ -94,11 +94,28 @@ namespace dxvk {
      * \brief Stops async compiler threads
      */
     void stopWorkerThreads() const;
+
+    /**
+     * \brief Vulkan pipeline cache to compile a pipeline with
+     *
+     * With \c dxvk.drawPipelineCache, pipelines that a draw
+     * waits for get a cache of their own, so they don't wait
+     * for the compiler threads on a driver that locks the
+     * cache while compiling. Otherwise all use one cache.
+     * \param [in] atDraw Whether a draw waits for the pipeline
+     * \returns Pipeline cache handle
+     */
+    VkPipelineCache getVkPipelineCache(bool atDraw) const {
+      return atDraw && m_drawCache != nullptr
+        ? m_drawCache->handle()
+        : m_cache->handle();
+    }
     
   private:
     
     const DxvkDevice*         m_device;
     Rc<DxvkPipelineCache>     m_cache;
+    Rc<DxvkPipelineCache>     m_drawCache;
     Rc<DxvkStateCache>        m_stateCache;
 
     std::atomic<uint32_t>     m_numComputePipelines  = { 0 };

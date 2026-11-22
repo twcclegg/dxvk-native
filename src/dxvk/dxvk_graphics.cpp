@@ -105,7 +105,6 @@ namespace dxvk {
 
   static std::atomic<uint32_t> g_stageInflight = { 0u };
   static std::atomic<uint32_t> g_stageStarts = { 0u };
-  static thread_local bool t_stageAtDraw = false;
 
   static double mvkTotal(const MvkTrk& t) { return t.average * double(t.count); }
 
@@ -182,16 +181,22 @@ namespace dxvk {
         return VK_NULL_HANDLE;
 
       // Prevent other threads from adding new instances and check again
+      const double tLock = pipeLogEnabled() ? pipeNowMs() : 0.0;
       std::lock_guard<dxvk::mutex> lock(m_mutex);
       instance = this->findInstance(state, renderPass);
+
+      // LB_PIPE_LOG: a compiler thread held this shader set's lock, compiling this state (found) or another
+      if (pipeLogEnabled()) {
+        const double ms = pipeNowMs() - tLock;
+        if (ms >= 1.0)
+          std::fprintf(stderr, "pipe lock wait at draw: %.1f ms, %s\n", ms, instance ? "found" : "compiling");
+      }
 
       if (!instance) {
         // Keep pipeline object locked, at worst we're going to stall
         // a state cache worker and the current thread needs priority.
         const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
-        t_stageAtDraw = true;
-        instance = this->createInstance(state, renderPass);
-        t_stageAtDraw = false;
+        instance = this->createInstance(state, renderPass, true);
         if (pipeLogEnabled()) {
           const double ms = pipeNowMs() - t0;
           std::fprintf(stderr, "pipe compiled at draw: %.1f ms %s\n", ms,
@@ -233,7 +238,7 @@ namespace dxvk {
 
     if (!this->findInstance(state, renderPass)) {
       const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
-      this->createInstance(state, renderPass);
+      this->createInstance(state, renderPass, false);
       if (pipeLogEnabled())
         std::fprintf(stderr, "pipe compiled ahead: %.1f ms\n", pipeNowMs() - t0);
     }
@@ -242,8 +247,9 @@ namespace dxvk {
 
   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) {
-    VkPipeline pipeline = this->createPipeline(state, renderPass);
+    const DxvkRenderPass*                renderPass,
+          bool                           atDraw) {
+    VkPipeline pipeline = this->createPipeline(state, renderPass, atDraw);
 
     m_pipeMgr->m_numGraphicsPipelines += 1;
     return &(*m_pipelines.emplace(state, renderPass, pipeline));
@@ -264,7 +270,8 @@ namespace dxvk {
   
   VkPipeline DxvkGraphicsPipeline::createPipeline(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) const {
+    const DxvkRenderPass*                renderPass,
+          bool                           atDraw) const {
     if (Logger::logLevel() <= LogLevel::Debug) {
       Logger::debug("Compiling graphics pipeline...");
       this->logPipelineState(LogLevel::Debug, state);
@@ -571,7 +578,7 @@ namespace dxvk {
     VkPipeline pipeline = VK_NULL_HANDLE;
     const double ts2 = stages ? pipeNowMs() : 0.0;
     VkResult vr = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
-      m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline);
+      m_pipeMgr->getVkPipelineCache(atDraw), 1, &info, nullptr, &pipeline);
 
     if (stages) {
       const double ts3 = pipeNowMs();
@@ -582,7 +589,7 @@ namespace dxvk {
       auto dn = [&] (const MvkTrk& a, const MvkTrk& b) { return b.count - a.count; };
       std::fprintf(stderr, "pipe stages: %s t %.0f total %.2f spv %.2f vk %.2f | hash %.2f s2m %.2f/%u msl %.2f/%u "
         "lib %.2f/%u fret %.2f/%u fspec %.2f/%u pso %.2f/%u | %s vm %u\n",
-        t_stageAtDraw ? "draw" : "ahead", ts0, ts3 - ts0, ts1 - ts0, ts3 - ts2,
+        atDraw ? "draw" : "ahead", ts0, ts3 - ts0, ts1 - ts0, ts3 - ts2,
         d(mvk0.hash, mvk1.hash), d(mvk0.s2m, mvk1.s2m), dn(mvk0.s2m, mvk1.s2m),
         d(mvk0.msl, mvk1.msl), dn(mvk0.msl, mvk1.msl), d(mvk0.libCache, mvk1.libCache), dn(mvk0.libCache, mvk1.libCache),
         d(mvk0.fret, mvk1.fret), dn(mvk0.fret, mvk1.fret), d(mvk0.fspec, mvk1.fspec), dn(mvk0.fspec, mvk1.fspec),

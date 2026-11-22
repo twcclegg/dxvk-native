@@ -269,7 +269,8 @@ namespace dxvk {
     
     DxvkGraphicsPipelineInstance* createInstance(
       const DxvkGraphicsPipelineStateInfo& state,
-      const DxvkRenderPass*                renderPass);
+      const DxvkRenderPass*                renderPass,
+            bool                           atDraw);
     
     DxvkGraphicsPipelineInstance* findInstance(
       const DxvkGraphicsPipelineStateInfo& state,
@@ -277,7 +278,8 @@ namespace dxvk {
     
     VkPipeline createPipeline(
       const DxvkGraphicsPipelineStateInfo& state,
-      const DxvkRenderPass*                renderPass) const;
+      const DxvkRenderPass*                renderPass,
+            bool                           atDraw) const;
     
     void destroyPipeline(
             VkPipeline                     pipeline) const;
