@@ -4797,8 +4797,9 @@ namespace dxvk {
 
     // Apple port, LB_RP_UPLOAD=1: a copy into the buffer must end the active render pass, and every pass end
     // stores and reloads all attachments (two-layer RGBA16F and D32S8 in stereo; ~100 per frame in a Skyrim
-    // boss fight). Instead, rename the whole buffer and fill it from a snapshot of the mapping buffer, which
-    // holds the full contents unless the GPU wrote the buffer. LB_RP_UPLOAD_MAX caps the snapshot size.
+    // boss fight). Instead, replace the whole buffer's contents with a snapshot of the mapping buffer, which
+    // holds the full contents unless the GPU wrote the buffer (DxvkContext::replaceBuffer). LB_RP_UPLOAD_MAX caps
+    // the snapshot size.
     static const VkDeviceSize s_uploadMax = [] () -> VkDeviceSize {
       const char* e = std::getenv("LB_RP_UPLOAD");
       if (!e || !*e || *e == '0')
