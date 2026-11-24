@@ -4796,8 +4796,8 @@ namespace dxvk {
     D3D9Range& range = pResource->DirtyRange();
 
     // Apple port, LB_RP_UPLOAD=1: a copy into the buffer must end the active render pass, and every pass end
-    // stores and reloads all attachments (two-layer RGBA16F and D32S8 in stereo; ~100 per frame in a Skyrim
-    // boss fight). Instead, replace the whole buffer's contents with a snapshot of the mapping buffer, which
+    // stores and reloads all attachments (two-layer RGBA16F and D32S8 in stereo; about 80 passes per frame in a
+    // Skyrim boss fight). Instead, replace the whole buffer's contents with a snapshot of the mapping buffer, which
     // holds the full contents unless the GPU wrote the buffer (DxvkContext::replaceBuffer). LB_RP_UPLOAD_MAX caps
     // the snapshot size.
     static const VkDeviceSize s_uploadMax = [] () -> VkDeviceSize {
@@ -5767,8 +5767,11 @@ namespace dxvk {
   // before each cascade. Each pass then loads and stores the whole surface, and each partial clear
   // needs a pass of its own. With LB_RP_SHADOW_DS=1, a pass whose colour targets are all one-layer and
   // smaller than a two-layer depth-stencil surface uses a private surface of the colour targets' size
-  // instead, for drawing and for clears. The scene's surface keeps the contents it had; the shadow
-  // draws' depth is lost after the pass, so a game that reads it later draws wrong.
+  // instead, for drawing and for clears. The scene's surface keeps the contents it had. The private
+  // surface is kept per size and format and shared by all such passes, whatever scene surface is
+  // bound; it starts undefined. A pass that tests against depth it did not clear, or a game that reads
+  // the shadow draws' depth from the scene surface, draws wrong. The trigger does not look at the depth
+  // test, so any small one-layer target (cube face, CreateRenderTarget surface) also gets it.
   Rc<DxvkImageView> D3D9DeviceEx::ShadowDepthView() {
     static const bool s_enabled = [] {
       const char* e = std::getenv("LB_RP_SHADOW_DS");
