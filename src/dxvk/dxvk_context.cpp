@@ -1,4 +1,9 @@
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
+#include <string>
 #include <vector>
 #include <utility>
 
@@ -13,6 +18,56 @@
 #include "dxvk_main.h"
 
 namespace dxvk {
+
+  /* Apple port, LB_RP_ENDS=1: counts why render passes end. A pass end followed by a pass on the same images
+   * is a split that stores and reloads the attachments for nothing; those are counted per spillRenderPass
+   * caller ("same"), the rest as "change". About every 2 s a cumulative stderr line goes between the
+   * frame-time lines. CS thread only. */
+  namespace {
+    struct RpEnds {
+      const char* caller = "start";
+      int line = 0;
+      std::array<const void*, MaxNumRenderTargets + 1> sig = { };
+      std::map<std::pair<std::string, int>, std::array<uint64_t, 2>> count;
+      double lastPrint = 0.0;
+    };
+
+    RpEnds* rpEnds() {
+      static RpEnds* s = [] {
+        const char* e = std::getenv("LB_RP_ENDS");
+        return e && *e == '1' ? new RpEnds() : nullptr;
+      }();
+      return s;
+    }
+
+    std::array<const void*, MaxNumRenderTargets + 1> rpSignature(const DxvkFramebuffer& fb) {
+      std::array<const void*, MaxNumRenderTargets + 1> sig = { };
+      sig[0] = fb.getDepthTarget().view != nullptr ? fb.getDepthTarget().view->image().ptr() : nullptr;
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++)
+        sig[i + 1] = fb.getColorTarget(i).view != nullptr ? fb.getColorTarget(i).view->image().ptr() : nullptr;
+      return sig;
+    }
+
+    void rpEndsOnBind(const DxvkFramebuffer& fb) {
+      RpEnds* r = rpEnds();
+      if (!r)
+        return;
+      auto sig = rpSignature(fb);
+      r->count[{ r->caller, r->line }][sig == r->sig ? 0 : 1]++;
+      r->sig = sig;
+      r->caller = "start";
+      r->line = 0;
+
+      double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (now - r->lastPrint < 2.0)
+        return;
+      r->lastPrint = now;
+      std::string out = "rpends:";
+      for (const auto& e : r->count)
+        out += " " + e.first.first + ":" + std::to_string(e.first.second) + "=" + std::to_string(e.second[0]) + "/" + std::to_string(e.second[1]);
+      std::fprintf(stderr, "%s\n", out.c_str());
+    }
+  }
   
   DxvkContext::DxvkContext(const Rc<DxvkDevice>& device)
   : m_device      (device),
@@ -4087,9 +4142,14 @@ namespace dxvk {
   }
   
   
-  void DxvkContext::spillRenderPass(bool suspend) {
+  void DxvkContext::spillRenderPass(bool suspend, const char* caller, int line) {
     if (m_flags.test(DxvkContextFlag::GpRenderPassBound)) {
       m_flags.clr(DxvkContextFlag::GpRenderPassBound);
+
+      if (RpEnds* r = rpEnds()) {
+        r->caller = caller;
+        r->line = line;
+      }
 
       this->pauseTransformFeedback();
       
@@ -4126,6 +4186,7 @@ namespace dxvk {
     const DxvkRenderPassOps&    ops,
           uint32_t              clearValueCount,
     const VkClearValue*         clearValues) {
+    rpEndsOnBind(*framebuffer);
     const DxvkFramebufferSize fbSize = framebuffer->size();
     
     VkRect2D renderArea;
