@@ -219,6 +219,7 @@ namespace dxvk {
       switch (srcFormat) {
         case VK_FORMAT_D16_UNORM:  return VK_FORMAT_R16_UNORM;
         case VK_FORMAT_D32_SFLOAT: return VK_FORMAT_R32_SFLOAT;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT: return VK_FORMAT_R32_SFLOAT;
         default:                   return VK_FORMAT_UNDEFINED;
       }
     }

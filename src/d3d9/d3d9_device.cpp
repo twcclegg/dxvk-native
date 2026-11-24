@@ -7894,6 +7894,25 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     const uint32_t layers = std::min(si.numLayers, di.numLayers);
+
+    // LB_DEPTH_COPY_FB=1: one full-screen draw per layer that samples the depth, instead of image -> buffer -> image.
+    static const bool s_fb = [] { const char* e = std::getenv("LB_DEPTH_COPY_FB"); return e && *e == '1'; }();
+    if (s_fb) {
+      EmitCs([
+        cSrc    = srcImage,
+        cDst    = dstImage,
+        cLayers = layers,
+        cExtent = VkExtent3D { si.extent.width, si.extent.height, 1u }
+      ] (DxvkContext* ctx) {
+        ctx->copyImage(
+          cDst, VkImageSubresourceLayers { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 },
+          cSrc, VkImageSubresourceLayers { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 },
+          cExtent);
+      });
+      dstTex->MarkAllWrittenByGPU();
+      return D3D_OK;
+    }
+
     const VkDeviceSize size = VkDeviceSize(si.extent.width) * si.extent.height * 4 * layers;
     if (m_depthCopyBuffer == nullptr || m_depthCopyBuffer->info().size < size) {
       DxvkBufferCreateInfo info;
