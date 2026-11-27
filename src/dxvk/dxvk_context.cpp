@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <utility>
@@ -19,15 +20,30 @@
 
 namespace dxvk {
 
-  /* Apple port, LB_RP_ENDS=1: counts why render passes end. A pass end followed by a pass on the same images
-   * is a split that stores and reloads the attachments for nothing; those are counted per spillRenderPass
-   * caller ("same"), the rest as "change". About every 2 s a cumulative stderr line goes between the
-   * frame-time lines. CS thread only. */
+  /* Apple port, LB_RP_ENDS=1: counts why render passes end. Each pass start is counted under the
+   * spillRenderPass caller that ended the context's previous pass: "same" if the new pass uses the same
+   * subresources in the same layouts (the split stored and reloaded them), else "change". "unspilled" counts
+   * passes whose predecessor ended outside spillRenderPass (the clear passes of performClear and
+   * clearImageViewFb); a meta pass begun directly (blit, resolve, mip generation, copyImageFb) makes the next
+   * pass "change". About every 2 s a cumulative stderr line goes between the frame-time lines. */
   namespace {
-    struct RpEnds {
+    struct RpAttachment {
+      const void* image; uint32_t mip, layer, layers; VkImageLayout layout;
+      bool operator == (const RpAttachment& o) const {
+        return image == o.image && mip == o.mip && layer == o.layer && layers == o.layers && layout == o.layout;
+      }
+    };
+    using RpSignature = std::array<RpAttachment, MaxNumRenderTargets + 1>;
+
+    struct RpContextState {
       const char* caller = "start";
       int line = 0;
-      std::array<const void*, MaxNumRenderTargets + 1> sig = { };
+      RpSignature sig = { };
+    };
+
+    struct RpEnds {
+      std::mutex mutex;
+      std::map<const void*, RpContextState> contexts;
       std::map<std::pair<std::string, int>, std::array<uint64_t, 2>> count;
       double lastPrint = 0.0;
     };
@@ -40,23 +56,44 @@ namespace dxvk {
       return s;
     }
 
-    std::array<const void*, MaxNumRenderTargets + 1> rpSignature(const DxvkFramebuffer& fb) {
-      std::array<const void*, MaxNumRenderTargets + 1> sig = { };
-      sig[0] = fb.getDepthTarget().view != nullptr ? fb.getDepthTarget().view->image().ptr() : nullptr;
-      for (uint32_t i = 0; i < MaxNumRenderTargets; i++)
-        sig[i + 1] = fb.getColorTarget(i).view != nullptr ? fb.getColorTarget(i).view->image().ptr() : nullptr;
-      return sig;
+    RpAttachment rpAttachment(const DxvkAttachment& a) {
+      if (a.view == nullptr)
+        return RpAttachment { nullptr, 0, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED };
+      const VkImageSubresourceRange sr = a.view->subresources();
+      return RpAttachment { a.view->image().ptr(), sr.baseMipLevel, sr.baseArrayLayer, sr.layerCount, a.layout };
     }
 
-    void rpEndsOnBind(const DxvkFramebuffer& fb) {
+    void rpEndsOnSpill(const void* ctx, const char* caller, int line) {
+      if (RpEnds* r = rpEnds()) {
+        std::lock_guard<std::mutex> lock(r->mutex);
+        RpContextState& c = r->contexts[ctx];
+        c.caller = caller;
+        c.line = line;
+      }
+    }
+
+    void rpEndsOnMetaPass(const void* ctx) {
+      if (RpEnds* r = rpEnds()) {
+        std::lock_guard<std::mutex> lock(r->mutex);
+        r->contexts[ctx].sig = { };
+      }
+    }
+
+    void rpEndsOnBind(const void* ctx, const DxvkFramebuffer& fb) {
       RpEnds* r = rpEnds();
       if (!r)
         return;
-      auto sig = rpSignature(fb);
-      r->count[{ r->caller, r->line }][sig == r->sig ? 0 : 1]++;
-      r->sig = sig;
-      r->caller = "start";
-      r->line = 0;
+      RpSignature sig;
+      sig[0] = rpAttachment(fb.getDepthTarget());
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++)
+        sig[i + 1] = rpAttachment(fb.getColorTarget(i));
+
+      std::lock_guard<std::mutex> lock(r->mutex);
+      RpContextState& c = r->contexts[ctx];
+      r->count[{ c.caller, c.line }][sig == c.sig ? 0 : 1]++;
+      c.sig = sig;
+      c.caller = "unspilled";
+      c.line = 0;
 
       double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
       if (now - r->lastPrint < 2.0)
@@ -1895,6 +1932,7 @@ namespace dxvk {
       pushConstants.srcCoord1  = { 1.0f, 1.0f, 1.0f };
       pushConstants.layerCount = passExtent.depth;
       
+      rpEndsOnMetaPass(this);
       m_cmd->cmdBeginRenderPass(&passInfo, VK_SUBPASS_CONTENTS_INLINE);
       m_cmd->cmdBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeInfo.pipeHandle);
       m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2952,6 +2990,7 @@ namespace dxvk {
     passInfo.clearValueCount  = 0;
     passInfo.pClearValues     = nullptr;
 
+    rpEndsOnMetaPass(this);
     m_cmd->cmdBeginRenderPass(&passInfo, VK_SUBPASS_CONTENTS_INLINE);
 
     // Bind pipeline
@@ -3716,6 +3755,7 @@ namespace dxvk {
     info.pClearValues       = nullptr;
 
     // Perform the actual copy operation
+    rpEndsOnMetaPass(this);
     m_cmd->cmdBeginRenderPass(&info, VK_SUBPASS_CONTENTS_INLINE);
     m_cmd->cmdBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeInfo.pipeHandle);
     m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -3949,6 +3989,7 @@ namespace dxvk {
     info.clearValueCount    = 0;
     info.pClearValues       = nullptr;
 
+    rpEndsOnMetaPass(this);
     m_cmd->cmdBeginRenderPass(&info, VK_SUBPASS_CONTENTS_INLINE);
     m_cmd->cmdEndRenderPass();
 
@@ -4082,6 +4123,7 @@ namespace dxvk {
       region.srcOffset.x - region.dstOffset.x,
       region.srcOffset.y - region.dstOffset.y };
     
+    rpEndsOnMetaPass(this);
     m_cmd->cmdBeginRenderPass(&info, VK_SUBPASS_CONTENTS_INLINE);
     m_cmd->cmdBindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeInfo.pipeHandle);
     m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4146,10 +4188,7 @@ namespace dxvk {
     if (m_flags.test(DxvkContextFlag::GpRenderPassBound)) {
       m_flags.clr(DxvkContextFlag::GpRenderPassBound);
 
-      if (RpEnds* r = rpEnds()) {
-        r->caller = caller;
-        r->line = line;
-      }
+      rpEndsOnSpill(this, caller, line);
 
       this->pauseTransformFeedback();
       
@@ -4186,7 +4225,7 @@ namespace dxvk {
     const DxvkRenderPassOps&    ops,
           uint32_t              clearValueCount,
     const VkClearValue*         clearValues) {
-    rpEndsOnBind(*framebuffer);
+    rpEndsOnBind(this, *framebuffer);
     const DxvkFramebufferSize fbSize = framebuffer->size();
     
     VkRect2D renderArea;
