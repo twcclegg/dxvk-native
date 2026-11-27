@@ -41,6 +41,8 @@ namespace dxvk {
     // runtime names one for this Present (dxvk_present_tap_set_depth). Created on first use.
     std::array<Rc<DxvkImage>, Slots>     depthImages;
     std::array<bool, Slots>              hasDepth = { };
+    std::array<Rc<DxvkImage>, Slots>     hudImages;
+    std::array<bool, Slots>              hasHud = { };
   };
 #endif
 
@@ -164,6 +166,8 @@ namespace dxvk {
 
     int32_t RecordPresentTap(const Rc<DxvkImage>& Source);
     void RecordPresentTapDepth(uint32_t Slot);
+
+    void RecordPresentTapHud(uint32_t Slot);
     void NotifyPresentTap(uint32_t Slot);
     bool PresentTapExclusive() const;
     void SubmitTapOnly();
