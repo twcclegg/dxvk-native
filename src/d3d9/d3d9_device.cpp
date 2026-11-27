@@ -7895,9 +7895,12 @@ namespace dxvk {
 
     const uint32_t layers = std::min(si.numLayers, di.numLayers);
 
-    // LB_DEPTH_COPY_FB=1: one full-screen draw per layer that samples the depth, instead of image -> buffer -> image.
+    // LB_DEPTH_COPY_FB=1: one instanced full-screen draw that samples the depth into every layer, instead of
+    // image -> buffer -> image. It needs the layer from the vertex shader (no geometry shaders on Metal) and a
+    // target it can render to directly (else copyImageFb renders into a temporary image and copies again).
     static const bool s_fb = [] { const char* e = std::getenv("LB_DEPTH_COPY_FB"); return e && *e == '1'; }();
-    if (s_fb) {
+    if (s_fb && m_dxvkDevice->extensions().extShaderViewportIndexLayer
+     && (di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
       EmitCs([
         cSrc    = srcImage,
         cDst    = dstImage,
