@@ -7412,17 +7412,49 @@ namespace dxvk {
     VkSampleCountFlagBits srcSampleCount;
     DecodeMultiSampleType(srcDesc->MultiSample, srcDesc->MultisampleQuality, &srcSampleCount);
 
+    // Apple port (stereo): under LB_STEREO_MULTIVIEW the scene's depth-stencil and an INTZ texture of at least
+    // the back buffer's size both have two layers (GetStereoLayerCount), and a pixel shader sampling the texture
+    // reads layer gl_ViewIndex (the stereo bits of spec constant 12). Copy eye for eye, as CopyDepthToFloat
+    // does; a copy of layer 0 alone left the right eye reading a layer nothing writes. A one-layer (mono) source
+    // fills every layer of a stereo texture. A stereo source into a one-layer texture keeps the left eye's depth
+    // for both eyes, as before, and says so once. Stereo targets are never multisampled, so only this path
+    // needs it.
+    const uint32_t srcLayers = srcTextureInfo->GetStereoLayers();
+    const uint32_t dstLayers = dstTextureInfo->GetStereoLayers();
+
+    if (unlikely(srcLayers > dstLayers)) {
+      static bool warned = false;
+      if (!std::exchange(warned, true))
+        Logger::warn(str::format("D3D9DeviceEx::ResolveZ: ", srcLayers, "-layer depth-stencil into a ",
+          dstLayers, "-layer texture: every eye reads layer 0"));
+    }
+
     if (srcSampleCount == VK_SAMPLE_COUNT_1_BIT) {
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
         cSrcImage  = srcTextureInfo->GetImage(),
         cDstLayers = dstSubresourceLayers,
-        cSrcLayers = srcSubresourceLayers
+        cSrcLayers = srcSubresourceLayers,
+        cCount     = std::min(srcLayers, dstLayers),
+        cDstCount  = dstLayers
       ] (DxvkContext* ctx) {
+        VkImageSubresourceLayers dstLayers = cDstLayers;
+        VkImageSubresourceLayers srcLayers = cSrcLayers;
+        dstLayers.layerCount = srcLayers.layerCount = cCount;
         ctx->copyImage(
-          cDstImage, cDstLayers, VkOffset3D { 0, 0, 0 },
-          cSrcImage, cSrcLayers, VkOffset3D { 0, 0, 0 },
+          cDstImage, dstLayers, VkOffset3D { 0, 0, 0 },
+          cSrcImage, srcLayers, VkOffset3D { 0, 0, 0 },
           cDstImage->mipLevelExtent(cDstLayers.mipLevel));
+
+        // Mono source, stereo texture: the remaining layers get the source's one layer too.
+        for (uint32_t i = cCount; i < cDstCount; i++) {
+          dstLayers.baseArrayLayer = cDstLayers.baseArrayLayer + i;
+          dstLayers.layerCount = srcLayers.layerCount = 1;
+          ctx->copyImage(
+            cDstImage, dstLayers, VkOffset3D { 0, 0, 0 },
+            cSrcImage, srcLayers, VkOffset3D { 0, 0, 0 },
+            cDstImage->mipLevelExtent(cDstLayers.mipLevel));
+        }
       });
     } else {
       EmitCs([
