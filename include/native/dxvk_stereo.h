@@ -16,7 +16,8 @@
  * Single-pass stereo (multiview): with LB_STEREO_MULTIVIEW=1 at launch (read once) and a Vulkan device with
  * multiview, both eyes come from ONE submission of each draw:
  *   - render targets and depth-stencil surfaces created with the back buffer's exact size (not the back buffer
- *     itself; not multisampled, cube, volume or array resources) get a second image layer;
+ *     itself; not multisampled, cube, volume or array resources) get a second image layer, and so do targets
+ *     the runtime names later (dxvk_stereo_make_layered);
  *   - a pass renders with view mask 0b11 (view i into layer i) when every bound attachment has two layers;
  *     otherwise it is an ordinary mono pass that renders layer 0, as before;
  *   - the vertex shader subtracts the offset of its own view: view 0's in mono passes.
@@ -61,6 +62,14 @@ void dxvk_stereo_set_view_clip_matrices(const float view0[16], const float view1
  * other offsets leave alone. Meant for the interface: set while it is drawn, so it sits at a depth instead of at
  * infinity (equal positions in two parallel eyes), and zero otherwise (full-screen post quads must not move). */
 void dxvk_stereo_set_view_ui_offsets(const float view0[4], const float view1[4]);
+/* Multiview only: gives the image behind `surface` (IDirect3DSurface9*: level 0 of a one-level render-target
+ * texture, or a depth-stencil surface; D3DPOOL_DEFAULT, not multisampled) a second layer, as if it had been created
+ * as a stereo target: passes whose attachments all have two layers then draw both views, and pixel shaders sample
+ * it per view. For a target the size rule above leaves mono that the eyes need their own copy of: the game's
+ * deferred sun-shadow mask, smaller than the back buffer below iShadowMaskQuarter=4, whose screen-space result the
+ * main pass reads by pixel position. The old contents are lost (the new image starts cleared to zero), so call it
+ * between frames. Returns an HRESULT: D3D_OK, also when it already has two layers. */
+long dxvk_stereo_make_layered(void* device, void* surface);
 /* The depth of a depth-stencil surface (IDirect3DSurface9*, a 24-bit or float depth format) copied into an R32F
  * render target of the same size (every layer both have), on the GPU: replaces a pass that redraws the scene only
  * to get its depth into a sampleable target. Returns an HRESULT. */

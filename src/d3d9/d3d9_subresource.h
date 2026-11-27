@@ -120,6 +120,14 @@ namespace dxvk {
       return m_baseTexture;
     }
 
+    /* Apple port (stereo): drops the cached views, after the texture's image was replaced
+     * (D3D9CommonTexture::MakeStereoLayered); they are made again on next use. */
+    inline void ClearViews() {
+      m_sampleView       = D3D9ColorView();
+      m_renderTargetView = D3D9ColorView();
+      m_depthStencilView = nullptr;
+    }
+
     inline void Swap(D3D9Subresource* Other) {
       // Only used for swap chain back buffers that don't
       // have a container and all have identical properties
