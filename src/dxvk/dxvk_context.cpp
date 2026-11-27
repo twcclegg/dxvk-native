@@ -95,8 +95,11 @@ namespace dxvk {
       RpSignature sig;
       bool loads = true;
       sig[0] = rpAttachment(fb.getDepthTarget());
-      if (sig[0].image)
+      if (sig[0].image) {
         loads &= ops.depthOps.loadOpD == VK_ATTACHMENT_LOAD_OP_LOAD;
+        if (fb.getDepthTarget().view->info().aspect & VK_IMAGE_ASPECT_STENCIL_BIT)
+          loads &= ops.depthOps.loadOpS == VK_ATTACHMENT_LOAD_OP_LOAD;
+      }
       for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
         sig[i + 1] = rpAttachment(fb.getColorTarget(i));
         if (sig[i + 1].image)
