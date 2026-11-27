@@ -20,12 +20,13 @@
 
 namespace dxvk {
 
-  /* Apple port, LB_RP_ENDS=1: counts why render passes end. Each pass start is counted under the
-   * spillRenderPass caller that ended the context's previous pass: "same" if the new pass uses the same
-   * subresources in the same layouts (the split stored and reloaded them), else "change". "unspilled" counts
-   * passes whose predecessor ended outside spillRenderPass (the clear passes of performClear and
-   * clearImageViewFb); a meta pass begun directly (blit, resolve, mip generation, copyImageFb) makes the next
-   * pass "change". About every 2 s a cumulative stderr line goes between the frame-time lines. */
+  /* Apple port, LB_RP_ENDS=1: counts why render passes end. Each pass that startRenderPass begins is counted
+   * under the spillRenderPass caller (the immediate caller, so all draws share updateFramebuffer's line) that
+   * ended the context's previous such pass: "same" if the new pass uses the same subresources in the same
+   * layouts and loads every attachment (the split stored and reloaded them), else "change". Any other pass in
+   * between (the clear passes of performClear and clearImageViewFb, blits, resolves, mip generation,
+   * copyImageFb) makes the next pass "change". About every 2 s a cumulative stderr line goes between the
+   * frame-time lines. */
   namespace {
     struct RpAttachment {
       const void* image; uint32_t mip, layer, layers; VkImageLayout layout;
@@ -38,6 +39,7 @@ namespace dxvk {
     struct RpContextState {
       const char* caller = "start";
       int line = 0;
+      bool valid = false;
       RpSignature sig = { };
     };
 
@@ -51,7 +53,7 @@ namespace dxvk {
     RpEnds* rpEnds() {
       static RpEnds* s = [] {
         const char* e = std::getenv("LB_RP_ENDS");
-        return e && *e == '1' ? new RpEnds() : nullptr;
+        return e && e[0] == '1' && !e[1] ? new RpEnds() : nullptr;
       }();
       return s;
     }
@@ -75,23 +77,37 @@ namespace dxvk {
     void rpEndsOnMetaPass(const void* ctx) {
       if (RpEnds* r = rpEnds()) {
         std::lock_guard<std::mutex> lock(r->mutex);
-        r->contexts[ctx].sig = { };
+        r->contexts[ctx].valid = false;
       }
     }
 
-    void rpEndsOnBind(const void* ctx, const DxvkFramebuffer& fb) {
+    void rpEndsForget(const void* ctx) {
+      if (RpEnds* r = rpEnds()) {
+        std::lock_guard<std::mutex> lock(r->mutex);
+        r->contexts.erase(ctx);
+      }
+    }
+
+    void rpEndsOnStart(const void* ctx, const DxvkFramebuffer& fb, const DxvkRenderPassOps& ops) {
       RpEnds* r = rpEnds();
       if (!r)
         return;
       RpSignature sig;
+      bool loads = true;
       sig[0] = rpAttachment(fb.getDepthTarget());
-      for (uint32_t i = 0; i < MaxNumRenderTargets; i++)
+      if (sig[0].image)
+        loads &= ops.depthOps.loadOpD == VK_ATTACHMENT_LOAD_OP_LOAD;
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
         sig[i + 1] = rpAttachment(fb.getColorTarget(i));
+        if (sig[i + 1].image)
+          loads &= ops.colorOps[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
+      }
 
       std::lock_guard<std::mutex> lock(r->mutex);
       RpContextState& c = r->contexts[ctx];
-      r->count[{ c.caller, c.line }][sig == c.sig ? 0 : 1]++;
+      r->count[{ c.caller, c.line }][c.valid && loads && sig == c.sig ? 0 : 1]++;
       c.sig = sig;
+      c.valid = true;
       c.caller = "unspilled";
       c.line = 0;
 
@@ -125,7 +141,7 @@ namespace dxvk {
   
   
   DxvkContext::~DxvkContext() {
-    
+    rpEndsForget(this);
   }
   
   
@@ -2220,6 +2236,7 @@ namespace dxvk {
       ops.barrier.dstStages = imageView->imageInfo().stages;
       ops.barrier.dstAccess = imageView->imageInfo().access;
 
+      rpEndsOnMetaPass(this);
       this->renderPassBindFramebuffer(
         m_device->createFramebuffer(attachments),
         ops, 1, &clearValue);
@@ -3354,6 +3371,7 @@ namespace dxvk {
 
       // We cannot leverage render pass clears
       // because we clear only part of the view
+      rpEndsOnMetaPass(this);
       this->renderPassBindFramebuffer(
         m_device->createFramebuffer(attachments),
         ops, 0, nullptr);
@@ -4161,6 +4179,7 @@ namespace dxvk {
 
       m_execBarriers.recordCommands(m_cmd);
 
+      rpEndsOnStart(this, *m_state.om.framebuffer, m_state.om.renderPassOps);
       this->renderPassBindFramebuffer(
         m_state.om.framebuffer,
         m_state.om.renderPassOps,
@@ -4225,7 +4244,6 @@ namespace dxvk {
     const DxvkRenderPassOps&    ops,
           uint32_t              clearValueCount,
     const VkClearValue*         clearValues) {
-    rpEndsOnBind(this, *framebuffer);
     const DxvkFramebufferSize fbSize = framebuffer->size();
     
     VkRect2D renderArea;
