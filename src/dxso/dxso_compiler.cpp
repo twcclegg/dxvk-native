@@ -12,6 +12,7 @@
 #include "../dxvk/dxvk_spec_const.h"
 
 #include <cfloat>
+#include <cstdlib>
 
 namespace dxvk {
 
@@ -43,6 +44,38 @@ namespace dxvk {
 
     m_usedSamplers = 0;
     m_usedRTs      = 0;
+
+#ifdef __APPLE__
+    // LB_STEREO_REBUILD=<sha1>:<register>[,...] (default: TESV 1.9.32's sun-shadow pass on the RESZ path, its
+    // InvViewProj at c6); "off" disables. Pixel shaders only, with multiview.
+    if (programInfo.type() == DxsoProgramType::PixelShader && DxsoStereoMultiviewRequested()) {
+      static const std::string spec = [] {
+        const char* e = std::getenv("LB_STEREO_REBUILD");
+        return e && *e ? std::string(e) : std::string("3d93ae8fe6599db4b8646faa54b2049bab0b6495:6");
+      }();
+      if (spec != "off") {
+        size_t pos = 0;
+        while (pos < spec.size()) {
+          size_t end = spec.find(',', pos);
+          if (end == std::string::npos) end = spec.size();
+          const std::string item = spec.substr(pos, end - pos);
+          const size_t colon = item.find(':');
+          if (colon != std::string::npos && fileName == "FS_" + item.substr(0, colon)) {
+            const uint32_t base = uint32_t(std::strtoul(item.c_str() + colon + 1, nullptr, 10));
+            constexpr uint32_t DataBase = 214;  // c214..c223: past every register the game's shaders use
+            if (base + 4 <= DataBase && DataBase + 10 <= layout.floatCount) {
+              m_stereoRebuildBase = base;
+              m_stereoRebuildData = DataBase;
+              m_meta.stereoRebuildData = DataBase;
+              Logger::info(str::format("LB_STEREO_REBUILD: ", fileName, ": per-view rebuild of c", base, "-c",
+                base + 3, " (data in c", DataBase, "-c", DataBase + 9, ")"));
+            }
+          }
+          pos = end + 1;
+        }
+      }
+    }
+#endif
 
     for (uint32_t i = 0; i < m_rRegs.size(); i++)
       m_rRegs.at(i)  = DxsoRegisterPointer{ };
@@ -1857,11 +1890,24 @@ namespace dxvk {
           emitRegisterLoad(src[1], srcMask));
         break;
       }
-      case DxsoOpcode::Dp4:
-        result = emitDot(
-          emitRegisterLoad(src[0], IdentityWriteMask),
-          emitRegisterLoad(src[1], IdentityWriteMask));
+      case DxsoOpcode::Dp4: {
+        DxsoRegisterValue a = emitRegisterLoad(src[0], IdentityWriteMask);
+        DxsoRegisterValue b = emitRegisterLoad(src[1], IdentityWriteMask);
+#ifdef __APPLE__
+        if (unlikely(m_stereoRebuildData)) {
+          auto isRow = [&](const DxsoRegister& r) {
+            return r.id.type == DxsoRegisterType::Const && !r.hasRelative
+                && r.id.num >= m_stereoRebuildBase && r.id.num < m_stereoRebuildBase + 4;
+          };
+          if (isRow(src[0]) && !isRow(src[1]))
+            b = emitStereoRebuild(b);
+          else if (isRow(src[1]) && !isRow(src[0]))
+            a = emitStereoRebuild(a);
+        }
+#endif
+        result = emitDot(a, b);
         break;
+      }
       case DxsoOpcode::Slt:
       case DxsoOpcode::Sge: {
         const uint32_t boolTypeId =
@@ -3141,12 +3187,9 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
 
 #ifdef __APPLE__
-  uint32_t DxsoCompiler::emitStereoLayer(uint32_t samplerIdx) {
-    const uint32_t intType   = m_module.defIntType(32, 1);
-    const uint32_t uintType  = m_module.defIntType(32, 0);
-    const uint32_t floatType = m_module.defFloatType(32);
-
+  uint32_t DxsoCompiler::emitViewIndexVar() {
     if (!m_ps.viewIndexVar) {
+      const uint32_t intType = m_module.defIntType(32, 1);
       m_module.enableCapability(spv::CapabilityMultiView);
       m_ps.viewIndexVar = m_module.newVar(
         m_module.defPointerType(intType, spv::StorageClassInput),
@@ -3156,6 +3199,57 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_module.setDebugName(m_ps.viewIndexVar, "view_index");
       m_entryPointInterfaces.push_back(m_ps.viewIndexVar);
     }
+    return m_ps.viewIndexVar;
+  }
+
+
+  DxsoRegisterValue DxsoCompiler::emitStereoRebuild(DxsoRegisterValue v) {
+    const uint32_t intType   = m_module.defIntType(32, 1);
+    const uint32_t floatType = m_module.defFloatType(32);
+    const uint32_t boolType  = m_module.defBoolType();
+    const uint32_t vec4Type  = getVectorTypeId({ DxsoScalarType::Float32, 4 });
+    const uint32_t bool4Type = m_module.defVectorType(boolType, 4);
+
+    auto loadConst = [&](uint32_t num) {
+      DxsoBaseRegister reg;
+      reg.id = { DxsoRegisterType::Const, num };
+      return emitRegisterLoadRaw(reg, nullptr).id;
+    };
+
+    // view 1 (layer 1) reads the second set; view 0, and any non-multiview pass, the first
+    const uint32_t isView1 = m_module.opIEqual(boolType,
+      m_module.opLoad(intType, emitViewIndexVar()), m_module.consti32(1));
+    const std::array<uint32_t, 4> sel4 = {{ isView1, isView1, isView1, isView1 }};
+    const uint32_t isView1Vec = m_module.opCompositeConstruct(bool4Type, 4, sel4.data());
+    auto pick = [&](uint32_t num0, uint32_t num1) {
+      return m_module.opSelect(vec4Type, isView1Vec, loadConst(num1), loadConst(num0));
+    };
+
+    const uint32_t d = m_stereoRebuildData;
+
+    // 1 / w of the pixel, from the inverse matrix's last row (it has no x or y term for a perspective camera)
+    const uint32_t invW = m_module.opDot(floatType, loadConst(m_stereoRebuildBase + 3), v.id);
+    const std::array<uint32_t, 4> invW4 = {{ invW, invW, invW, invW }};
+    const uint32_t u = m_module.opFFma(vec4Type, pick(d + 8, d + 9),
+      m_module.opCompositeConstruct(vec4Type, 4, invW4.data()), v.id);
+
+    std::array<uint32_t, 4> comps;
+    for (uint32_t i = 0; i < 4; i++)
+      comps[i] = m_module.opDot(floatType, pick(d + i, d + 4 + i), u);
+
+    DxsoRegisterValue result;
+    result.type = { DxsoScalarType::Float32, 4 };
+    result.id   = m_module.opCompositeConstruct(vec4Type, 4, comps.data());
+    return result;
+  }
+
+
+  uint32_t DxsoCompiler::emitStereoLayer(uint32_t samplerIdx) {
+    const uint32_t intType   = m_module.defIntType(32, 1);
+    const uint32_t uintType  = m_module.defIntType(32, 0);
+    const uint32_t floatType = m_module.defFloatType(32);
+
+    emitViewIndexVar();
 
     uint32_t stereo = m_module.opBitFieldUExtract(uintType, m_ps.depthFilterSpec,
       m_module.consti32(16 + samplerIdx), m_module.consti32(1));

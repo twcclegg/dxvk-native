@@ -36,6 +36,10 @@ namespace dxvk {
     uint32_t maxConstIndexB = 0;
 
     uint32_t boolConstantMask = 0;
+
+    /* Apple stereo (DxsoCompiler::emitStereoRebuild): the first of the 10 float constants the device fills with
+     * the per-view correction before each draw with this shader; 0 when the shader has none. */
+    uint32_t stereoRebuildData = 0;
   };
 
 }
