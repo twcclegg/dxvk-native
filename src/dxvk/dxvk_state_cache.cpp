@@ -498,8 +498,8 @@ namespace dxvk {
 
   /* Field-by-field difference between a cache entry (a) and a pipeline (b), for LB_PIPE_LOG=2. A field is
    * marked "dc" when it cannot change the pipeline Vulkan builds: blend factors and ops of an attachment with
-   * blending off in both, any blend or swizzle state of an attachment the fragment shader doesn't write or
-   * the pass doesn't have, depth compare and write with the depth test off (Vulkan skips depth writes then)
+   * blending off in both, any blend state of an attachment the fragment shader doesn't write or the pass
+   * doesn't have, the swizzle of an output the shader doesn't write, depth compare and write with the depth test off (Vulkan skips depth writes then)
    * or no depth attachment, stencil ops with the stencil test off, and the logic op with logic ops off: the
    * state dxvkNormalizePipelineState clears. */
   namespace {
@@ -637,7 +637,7 @@ namespace dxvk {
         const auto& q = b.omSwizzle[i];
         d.add(str::format("rt", i, ".swizzle"),
           p.rIndex() | p.gIndex() << 4 | p.bIndex() << 8 | p.aIndex() << 12,
-          q.rIndex() | q.gIndex() << 4 | q.bIndex() << 8 | q.aIndex() << 12, unused);
+          q.rIndex() | q.gIndex() << 4 | q.bIndex() << 8 | q.aIndex() << 12, !(fsOutMask & (1u << i)));
       }
 
       // Specialization constants
@@ -1338,7 +1338,19 @@ namespace dxvk {
       { std::unique_lock<dxvk::mutex> lock(m_workerLock);
 
         if (m_workerQueue.empty()) {
-          m_workerBusy -= 1;
+          // LB_PIPE_LOG=2: the last compiler thread to find the queue empty logs that the queue drained,
+          // so the log shows whether the replay of the cache finished before play started (the line
+          // lands among the frame lines)
+          if ((m_workerBusy -= 1) == 0 && dxvkPipeLogLevel() >= 2) {
+            uint32_t items = m_itemsSinceDrain.exchange(0u);
+
+            if (items) {
+              double ms = std::chrono::duration<double, std::milli>(high_resolution_clock::now() - m_startTime).count();
+              std::fprintf(stderr, "pipe cache drained: %u shader sets since the last drain, %.0f ms after start\n",
+                items, ms);
+            }
+          }
+
           m_workerCond.wait(lock, [this] () {
             return m_workerQueue.size()
                 || m_stopThreads.load();
@@ -1357,22 +1369,8 @@ namespace dxvk {
 
       compilePipelines(item);
 
-      // LB_PIPE_LOG=2: when the queue runs dry, so the log shows whether the replay of the cache
-      // finished before play started (the line lands among the frame lines)
-      if (dxvkPipeLogLevel() >= 2) {
-        uint32_t items = m_itemsSinceDrain.fetch_add(1) + 1;
-        bool drained;
-
-        { std::lock_guard<dxvk::mutex> lock(m_workerLock);
-          drained = m_workerQueue.empty();
-        }
-
-        if (drained && m_itemsSinceDrain.compare_exchange_strong(items, 0u)) {
-          double ms = std::chrono::duration<double, std::milli>(high_resolution_clock::now() - m_startTime).count();
-          std::fprintf(stderr, "pipe cache drained: %u shader sets since the last drain, %.0f ms after start\n",
-            items, ms);
-        }
-      }
+      if (dxvkPipeLogLevel() >= 2)
+        m_itemsSinceDrain += 1;
     }
   }
 
