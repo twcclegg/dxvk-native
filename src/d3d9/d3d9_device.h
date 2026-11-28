@@ -867,6 +867,9 @@ namespace dxvk {
             IDirect3DSurface9* pFloatTarget);
 
     Rc<DxvkBuffer> m_depthCopyBuffer;
+
+    /* Apple port (stereo): gives a one-layer target a second layer (dxvk_stereo_make_layered). */
+    HRESULT MakeStereoLayered(IDirect3DSurface9* pSurface);
     
     /* LB_STEREO_DUP (dxso_util.h). CS thread only: draws the current draw a second time with the mirrored
      * eye shift (the second half of the clip-plane buffer), then rebinds the normal half. */

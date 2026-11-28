@@ -666,6 +666,17 @@ namespace dxvk {
   }
 
 
+  // Apple port (stereo): StretchRect and UpdateSurface copy one layer, layer 0. Said once when the destination
+  // has two layers, since its layer 1 (the second view) then keeps its old contents.
+  static void LogStereoCopyIntoLayered(const char* Copy, const D3D9CommonTexture* pDst) {
+    static std::atomic<bool> s_logged = { false };
+    if (!s_logged.exchange(true)) {
+      Logger::warn(str::format("D3D9: stereo: ", Copy, " into a two-layer ", pDst->Desc()->Width, "x",
+        pDst->Desc()->Height, " target writes layer 0 only; layer 1 keeps its old contents (logged once)"));
+    }
+  }
+
+
   HRESULT STDMETHODCALLTYPE D3D9DeviceEx::UpdateSurface(
           IDirect3DSurface9* pSourceSurface,
     const RECT*              pSourceRect,
@@ -687,6 +698,9 @@ namespace dxvk {
 
     if (unlikely(srcTextureInfo->Desc()->Format != dstTextureInfo->Desc()->Format))
       return D3DERR_INVALIDCALL;
+
+    if (unlikely(dstTextureInfo->GetStereoLayers() > 1))
+      LogStereoCopyIntoLayered("UpdateSurface", dstTextureInfo);
 
     const DxvkFormatInfo* formatInfo = imageFormatInfo(dstTextureInfo->GetFormatMapping().FormatColor);
 
@@ -991,6 +1005,9 @@ namespace dxvk {
     if (unlikely(dstTextureInfo->Desc()->Pool != D3DPOOL_DEFAULT ||
                  srcTextureInfo->Desc()->Pool != D3DPOOL_DEFAULT))
       return D3DERR_INVALIDCALL;
+
+    if (unlikely(dstTextureInfo->GetStereoLayers() > 1))
+      LogStereoCopyIntoLayered("StretchRect", dstTextureInfo);
 
     Rc<DxvkImage> dstImage = dstTextureInfo->GetImage();
     Rc<DxvkImage> srcImage = srcTextureInfo->GetImage();
@@ -5193,10 +5210,11 @@ namespace dxvk {
 
   uint32_t D3D9DeviceEx::GetStereoLayerCount(const D3D9_COMMON_TEXTURE_DESC* pDesc, D3DRESOURCETYPE ResourceType) const {
     // Narrow first policy for single-pass stereo: the main scene's colour and depth targets, recognised by
-    // the back buffer's exact size (not its aspect: half-size targets such as the 960x540 reflection pass
-    // must stay mono). The back buffer itself stays single-layer, so passes into it stay mono; eye 2 leaves
-    // a two-layer target only through dxvk_stereo_get_render_target_data_layer for now (later chunks: layer
-    // aware copies and presentation). Multisampled targets, cube maps, volumes and arrays are left alone.
+    // the back buffer's exact size (not its aspect: smaller targets of that aspect include the luminance and
+    // bloom chain, drawn once and read by both eyes). The game's deferred sun-shadow mask is one of those
+    // smaller targets when iShadowMaskQuarter < 4 (960x540 at 1280x720 with 3); the runtime recognises its pass
+    // and layers it and its depth-stencil afterwards with dxvk_stereo_make_layered when the eyes need their own.
+    // Multisampled targets, cube maps, volumes and arrays are left alone.
     if (likely(!IsStereoMultiview()))
       return 1;
 
@@ -7919,6 +7937,78 @@ namespace dxvk {
     });
     dstTex->MarkAllWrittenByGPU();
     return D3D_OK;
+  }
+}
+
+
+namespace dxvk {
+  HRESULT D3D9DeviceEx::MakeStereoLayered(IDirect3DSurface9* pSurface) {
+    D3D9DeviceLock lock = LockDevice();
+    auto* surface = static_cast<D3D9Surface*>(pSurface);
+    if (!IsStereoMultiview() || surface == nullptr || surface->GetParent() != this)
+      return D3DERR_INVALIDCALL;
+
+    D3D9CommonTexture* tex = surface->GetCommonTexture();
+    if (tex == nullptr || tex->GetImage() == nullptr)
+      return D3DERR_INVALIDCALL;
+    if (tex->GetStereoLayers() == DxsoStereoViewCount)
+      return D3D_OK;
+
+    // What GetStereoLayerCount could have layered: a single 2D render target or depth-stencil image. One
+    // subresource only, so `surface` is the only one with cached views. A standalone render-target surface
+    // (CreateRenderTarget) is refused: it cannot be sampled and StretchRect copies only layer 0, so a second
+    // layer would never be read.
+    const D3D9_COMMON_TEXTURE_DESC* desc = tex->Desc();
+    const bool isDepth = (desc->Usage & D3DUSAGE_DEPTHSTENCIL) != 0;
+    if (tex->GetMapMode() != D3D9_COMMON_TEXTURE_MAP_MODE_BACKED
+     || !(desc->Usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL))
+     || desc->IsBackBuffer || desc->Pool != D3DPOOL_DEFAULT
+     || desc->MultiSample != D3DMULTISAMPLE_NONE
+     || (tex->GetType() != D3DRTYPE_SURFACE && tex->GetType() != D3DRTYPE_TEXTURE)
+     || (tex->GetType() == D3DRTYPE_SURFACE && !isDepth)
+     || tex->CountSubresources() != 1 || desc->ArraySize != 1 || desc->Depth != 1)
+      return D3DERR_INVALIDCALL;
+
+    const HRESULT hr = tex->MakeStereoLayered(DxsoStereoViewCount);
+    if (FAILED(hr)) {
+      Logger::warn(str::format("D3D9: stereo: ", desc->Width, "x", desc->Height,
+        isDepth ? " depth-stencil" : " render target", " keeps one layer: no second layer could be made"));
+      return hr;
+    }
+
+    surface->ClearViews();
+    m_initializer->InitTexture(tex);
+
+    // Bindings that hold views of the old image are made again at the next draw.
+    for (uint32_t i = 0; i < caps::MaxSimultaneousRenderTargets; i++) {
+      if (m_state.renderTargets[i] != nullptr && m_state.renderTargets[i]->GetCommonTexture() == tex)
+        m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+    }
+    if (m_state.depthStencil != nullptr && m_state.depthStencil->GetCommonTexture() == tex)
+      m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+    if (surface->GetBaseTexture() != nullptr)
+      MarkTextureBindingDirty(surface->GetBaseTexture());
+
+    Logger::info(str::format("D3D9: stereo: ", desc->Width, "x", desc->Height,
+      isDepth ? " depth-stencil" : " render target", " now has two layers"));
+    return D3D_OK;
+  }
+}
+
+
+extern "C" long dxvk_stereo_make_layered(void* device, void* surface) {
+  if (device == nullptr)
+    return D3DERR_INVALIDCALL;
+  auto* d3d9 = static_cast<dxvk::D3D9DeviceEx*>(static_cast<IDirect3DDevice9Ex*>(
+    static_cast<IDirect3DDevice9*>(device)));
+  // Nothing may unwind into the C caller.
+  try {
+    return d3d9->MakeStereoLayered(static_cast<IDirect3DSurface9*>(surface));
+  } catch (const dxvk::DxvkError& e) {
+    dxvk::Logger::err(e.message());
+    return E_FAIL;
+  } catch (...) {
+    return E_FAIL;
   }
 }
 
