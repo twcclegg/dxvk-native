@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 #include "../util/util_time.h"
 
@@ -68,7 +69,10 @@ namespace dxvk {
 
   /* Apple port, LB_PIPE_LOG=1: one stderr line per graphics pipeline compiled, with how long it took and whether
    * a draw waited for it ("at draw", on the CS thread) or the state cache's workers compiled it ahead. Lines land
-   * between the frame-time lines of the frame they belong to, so hitches can be matched to compiles. */
+   * between the frame-time lines of the frame they belong to, so hitches can be matched to compiles. An at-draw
+   * time includes the wait for the shader set's lock, which is also given on its own; a draw that waited 1 ms or
+   * more for that lock also gets a "pipe lock wait at draw" line, even when a compiler thread had just compiled
+   * the state it needed. */
   static bool pipeLogEnabled() {
     return dxvkPipeLogLevel() >= 1;
   }
@@ -120,12 +124,18 @@ namespace dxvk {
           DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPassFormat&          format,
           uint32_t                       fsOutMask) {
-    // Colour attachments: no blend or swizzle state where the fragment shader writes nothing or the pass has
-    // no attachment (createPipeline then writes nothing there), no factors or ops where blending is off
+    // Colour attachments: no blend state where the fragment shader writes nothing or the pass has no attachment
+    // (createPipeline then writes nothing there), no factors or ops where blending is off. The swizzle only where
+    // the shader writes nothing: for a written output it is a spec constant applied to the value, and output 0's
+    // alpha still feeds alpha-to-coverage when the pass has no attachment there.
     for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
-      if (!(fsOutMask & (1u << i)) || format.color[i].format == VK_FORMAT_UNDEFINED) {
-        std::memset(&state.omBlend[i], 0, sizeof(state.omBlend[i]));
+      const bool written = fsOutMask & (1u << i);
+
+      if (!written)
         std::memset(&state.omSwizzle[i], 0, sizeof(state.omSwizzle[i]));
+
+      if (!written || format.color[i].format == VK_FORMAT_UNDEFINED) {
+        std::memset(&state.omBlend[i], 0, sizeof(state.omBlend[i]));
       } else if (!state.omBlend[i].blendEnable()) {
         state.omBlend[i] = DxvkOmAttachmentBlend(VK_FALSE,
           VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD,
@@ -154,25 +164,35 @@ namespace dxvk {
 
 
   const DxvkGraphicsPipelineStateInfo& DxvkGraphicsPipeline::normalizeState(
-    const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass,
-          DxvkGraphicsPipelineStateInfo& scratch) const {
+    const DxvkGraphicsPipelineStateInfo&          state,
+    const DxvkRenderPass*                         renderPass,
+          std::optional<DxvkGraphicsPipelineStateInfo>& scratch) const {
     if (!dxvkPipelineNormalizeEnabled())
       return state;
 
-    scratch = state;
-    dxvkNormalizePipelineState(scratch, renderPass->format(), m_fsOut);
-    return scratch;
+    scratch.emplace(state);
+    dxvkNormalizePipelineState(*scratch, renderPass->format(), m_fsOut);
+    return *scratch;
   }
 
 
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& stateIn,
-    const DxvkRenderPass*                renderPass) {
+    const DxvkRenderPass*                renderPass,
+          DxvkGraphicsPipelineDynamicState* dynamicState) {
     // Apple port: pipelines are looked up, compiled and cached by their normalized state
     // (DXVK_PIPELINE_NORMALIZE), so draws that differ only in state Vulkan ignores share one
-    DxvkGraphicsPipelineStateInfo scratch;
+    std::optional<DxvkGraphicsPipelineStateInfo> scratch;
     const DxvkGraphicsPipelineStateInfo& state = this->normalizeState(stateIn, renderPass, scratch);
+
+    // The pipeline's dynamic states follow the state it is built with: normalization can turn off
+    // the stencil test, the depth bounds test or constant-factor blending that the caller's state has
+    if (dynamicState != nullptr) {
+      dynamicState->blendConstants = state.useDynamicBlendConstants();
+      dynamicState->depthBias      = state.useDynamicDepthBias();
+      dynamicState->depthBounds    = state.useDynamicDepthBounds();
+      dynamicState->stencilRef     = state.useDynamicStencilRef();
+    }
 
     DxvkGraphicsPipelineInstance* instance = this->findInstance(state, renderPass);
 
@@ -181,20 +201,26 @@ namespace dxvk {
       if (!this->validatePipelineState(state, true))
         return VK_NULL_HANDLE;
 
-      // Prevent other threads from adding new instances and check again
+      // Prevent other threads from adding new instances and check again. LB_PIPE_LOG times the draw from
+      // here, so the time includes waiting for a compiler thread that holds this shader set's lock.
+      const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
       std::lock_guard<dxvk::mutex> lock(m_mutex);
       instance = this->findInstance(state, renderPass);
+      const double lockWaitMs = pipeLogEnabled() ? pipeNowMs() - t0 : 0.0;
+
+      // LB_PIPE_LOG: a compiler thread held the lock, compiling this very state (found) or another one
+      if (pipeLogEnabled() && lockWaitMs >= 1.0)
+        std::fprintf(stderr, "pipe lock wait at draw: %.1f ms, %s\n", lockWaitMs, instance ? "found" : "compiling");
 
       if (!instance) {
         // Keep pipeline object locked, at worst we're going to stall
         // a state cache worker and the current thread needs priority.
-        const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
         t_stageAtDraw = true;
         instance = this->createInstance(state, renderPass);
         t_stageAtDraw = false;
         if (pipeLogEnabled()) {
           const double ms = pipeNowMs() - t0;
-          std::fprintf(stderr, "pipe compiled at draw: %.1f ms %s\n", ms,
+          std::fprintf(stderr, "pipe compiled at draw: %.1f ms (lock wait %.1f ms) %s\n", ms, lockWaitMs,
             this->describeCacheMiss(state, renderPass->format()).c_str());
         }
         bool queued = this->writePipelineStateToCache(state, renderPass->format());
@@ -220,7 +246,7 @@ namespace dxvk {
     const DxvkGraphicsPipelineStateInfo& stateIn,
     const DxvkRenderPass*                renderPass) {
     // Cache entries written before normalization (or by a build without it) compile in normalized form too
-    DxvkGraphicsPipelineStateInfo scratch;
+    std::optional<DxvkGraphicsPipelineStateInfo> scratch;
     const DxvkGraphicsPipelineStateInfo& state = this->normalizeState(stateIn, renderPass, scratch);
 
     // Exit early if the state vector is invalid
