@@ -7901,14 +7901,25 @@ namespace dxvk {
     // capability. The target must be renderable (else copyImageFb renders into a temporary image and copies again)
     // and its layers must fit one framebuffer.
     static const bool s_fb = [] { const char* e = std::getenv("LB_DEPTH_COPY_FB"); return e && *e == '1'; }();
-    const bool fb = s_fb && m_dxvkDevice->extensions().extShaderViewportIndexLayer
-      && (di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
-      && layers <= m_dxvkDevice->properties().core.properties.limits.maxFramebufferLayers;
-    static bool s_logged = false;
-    if (s_fb && !s_logged) {
-      s_logged = true;
-      Logger::info(fb ? "LB_DEPTH_COPY_FB: depth copied with a shader draw"
-                      : "LB_DEPTH_COPY_FB: not usable here (no layer from the vertex shader, no render-target usage or too many layers); buffer copy");
+    bool fb = false;
+    if (s_fb) {
+      const char* fallback = nullptr;
+      uint32_t    outcome  = 0;
+      if (!m_dxvkDevice->extensions().extShaderViewportIndexLayer) {
+        outcome = 1; fallback = "no VK_EXT_shader_viewport_index_layer";
+      } else if (!(di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+        outcome = 2; fallback = "target without colour attachment usage";
+      } else if (layers > m_dxvkDevice->properties().core.properties.limits.maxFramebufferLayers) {
+        outcome = 4; fallback = "more layers than maxFramebufferLayers";
+      } else {
+        outcome = 8; fb = true;
+      }
+      // One line per distinct outcome, so a later call that takes the other path is logged too.
+      static std::atomic<uint32_t> s_logged { 0u };
+      if (!(s_logged.load(std::memory_order_relaxed) & outcome) && !(s_logged.fetch_or(outcome) & outcome)) {
+        Logger::info(fb ? std::string("LB_DEPTH_COPY_FB: depth copied with a shader draw")
+                        : std::string("LB_DEPTH_COPY_FB: buffer copy (") + fallback + ")");
+      }
     }
     if (fb) {
       EmitCs([
