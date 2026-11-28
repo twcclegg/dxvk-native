@@ -9,6 +9,7 @@
 #include <atomic>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -37,6 +38,14 @@ namespace dxvk {
       const void*                 pShaderBytecode,
       const DxsoAnalysisInfo&     AnalysisInfo,
             DxsoModule*           pModule);
+
+    /**
+     * \brief Registers the shaders with the state cache
+     *
+     * Done once per module, by the shader module set,
+     * for the module it keeps.
+     */
+    void RegisterShaders(D3D9DeviceEx* pDevice) const;
 
 
     Rc<DxvkShader> GetShader(D3D9ShaderPermutation Permutation) const {
@@ -200,6 +209,16 @@ namespace dxvk {
      * own CreateVertexShader/CreatePixelShader later find the same module.
      * Off when the state cache is off (DXVK_STATE_CACHE=0 or
      * dxvk.enableStateCache = False) or with DXVK_SHADER_BYTECODE_CACHE=0.
+     *
+     * Trade-off: every shader any earlier run created is created, so the
+     * compiler threads compile every pipeline in the state cache file on
+     * every launch, including areas, settings and mono/stereo variants this
+     * session never uses, and keep them for the life of the device. Neither
+     * file is ever pruned, so that work and memory grow with play history.
+     * The log says how long it took ("compiler threads idle ... ms after
+     * shader creation started"). Whether it needs a bound (for example
+     * skipping entries no recent launch used) depends on its time and
+     * memory cost on the target device.
      */
     void StartBytecodeCache(
             D3D9DeviceEx*         pDevice,
@@ -226,6 +245,11 @@ namespace dxvk {
             std::vector<std::pair<VkShaderStageFlagBits, std::vector<char>>> Shaders);
     
     dxvk::mutex m_mutex;
+
+    // Keys of modules being created, so a second thread waits instead of compiling
+    // the same shader again (Apple port; guarded by m_mutex)
+    dxvk::condition_variable  m_moduleCond;
+    std::unordered_set<DxvkShaderKey, DxvkHash, DxvkEq> m_modulesInFlight;
 
     // Bytecode cache (Apple port)
     bool                      m_cacheEnabled = false;
