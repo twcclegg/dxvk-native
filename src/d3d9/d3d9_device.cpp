@@ -7412,38 +7412,87 @@ namespace dxvk {
     VkSampleCountFlagBits srcSampleCount;
     DecodeMultiSampleType(srcDesc->MultiSample, srcDesc->MultisampleQuality, &srcSampleCount);
 
+    // Apple port (stereo): under LB_STEREO_MULTIVIEW the scene's depth-stencil and an INTZ texture of at least
+    // the back buffer's size both have two layers (GetStereoLayerCount), and a pixel shader sampling the texture
+    // reads layer gl_ViewIndex (the stereo bits of spec constant 12). Copy eye for eye, as CopyDepthToFloat
+    // does; a copy of layer 0 alone left the right eye reading a layer nothing writes. A one-layer (mono) source
+    // fills every layer of a stereo texture. That happens when the source is multisampled (always one layer,
+    // while the single-sampled INTZ texture can still have two) or smaller than the back buffer. A stereo source
+    // into a one-layer texture keeps the left eye's depth for both eyes, as before, and says so once.
+    const uint32_t srcLayerCount = srcTextureInfo->GetStereoLayers();
+    const uint32_t dstLayerCount = dstTextureInfo->GetStereoLayers();
+
+    if (unlikely(srcLayerCount > dstLayerCount)) {
+      static bool s_warnedStereoToMono = false;
+      if (!std::exchange(s_warnedStereoToMono, true))
+        Logger::warn(str::format("D3D9DeviceEx::ResolveZ: ", srcLayerCount, "-layer depth-stencil into a ",
+          dstLayerCount, "-layer texture: every eye reads layer 0"));
+    }
+
+    // Copy or resolve only the region both images have. A source smaller than the texture (the mono case above,
+    // or a mipped INTZ surface) would otherwise be read past its edge.
+    VkExtent3D extent = dstTextureInfo->GetImage()->mipLevelExtent(dstSubresourceLayers.mipLevel);
+    const VkExtent3D srcExtent = srcTextureInfo->GetImage()->mipLevelExtent(srcSubresourceLayers.mipLevel);
+    extent.width  = std::min(extent.width,  srcExtent.width);
+    extent.height = std::min(extent.height, srcExtent.height);
+    extent.depth  = std::min(extent.depth,  srcExtent.depth);
+
     if (srcSampleCount == VK_SAMPLE_COUNT_1_BIT) {
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
         cSrcImage  = srcTextureInfo->GetImage(),
-        cDstLayers = dstSubresourceLayers,
-        cSrcLayers = srcSubresourceLayers
+        cDstSubres = dstSubresourceLayers,
+        cSrcSubres = srcSubresourceLayers,
+        cExtent    = extent,
+        cCount     = std::min(srcLayerCount, dstLayerCount),
+        cDstCount  = dstLayerCount
       ] (DxvkContext* ctx) {
+        VkImageSubresourceLayers dstSub = cDstSubres;
+        VkImageSubresourceLayers srcSub = cSrcSubres;
+        dstSub.layerCount = srcSub.layerCount = cCount;
         ctx->copyImage(
-          cDstImage, cDstLayers, VkOffset3D { 0, 0, 0 },
-          cSrcImage, cSrcLayers, VkOffset3D { 0, 0, 0 },
-          cDstImage->mipLevelExtent(cDstLayers.mipLevel));
+          cDstImage, dstSub, VkOffset3D { 0, 0, 0 },
+          cSrcImage, srcSub, VkOffset3D { 0, 0, 0 },
+          cExtent);
+
+        // Mono source, stereo texture: the remaining layers get the source's one layer too.
+        for (uint32_t i = cCount; i < cDstCount; i++) {
+          dstSub.baseArrayLayer = cDstSubres.baseArrayLayer + i;
+          dstSub.layerCount = srcSub.layerCount = 1;
+          ctx->copyImage(
+            cDstImage, dstSub, VkOffset3D { 0, 0, 0 },
+            cSrcImage, srcSub, VkOffset3D { 0, 0, 0 },
+            cExtent);
+        }
       });
     } else {
       EmitCs([
         cDstImage  = dstTextureInfo->GetImage(),
         cSrcImage  = srcTextureInfo->GetImage(),
         cDstSubres = dstSubresourceLayers,
-        cSrcSubres = srcSubresourceLayers
+        cSrcSubres = srcSubresourceLayers,
+        cExtent    = extent,
+        cSrcCount  = srcLayerCount,
+        cDstCount  = dstLayerCount
       ] (DxvkContext* ctx) {
         // We should resolve using the first sample according to
         // http://amd-dev.wpengine.netdna-cdn.com/wordpress/media/2012/10/Advanced-DX9-Capabilities-for-ATI-Radeon-Cards_v2.pdf
         // "The resolve operation copies the depth value from the *first sample only* into the resolved depth stencil texture."
         constexpr auto resolveMode = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT_KHR;
 
-        VkImageResolve region;
-        region.srcSubresource = cSrcSubres;
-        region.srcOffset      = VkOffset3D { 0, 0, 0 };
-        region.dstSubresource = cDstSubres;
-        region.dstOffset      = VkOffset3D { 0, 0, 0 };
-        region.extent         = cDstImage->mipLevelExtent(cDstSubres.mipLevel);
+        // One resolve per layer of the texture: a multisampled source has one layer, which every eye gets.
+        for (uint32_t i = 0; i < cDstCount; i++) {
+          VkImageResolve region;
+          region.srcSubresource = cSrcSubres;
+          region.srcSubresource.baseArrayLayer = cSrcSubres.baseArrayLayer + std::min(i, cSrcCount - 1);
+          region.srcOffset      = VkOffset3D { 0, 0, 0 };
+          region.dstSubresource = cDstSubres;
+          region.dstSubresource.baseArrayLayer = cDstSubres.baseArrayLayer + i;
+          region.dstOffset      = VkOffset3D { 0, 0, 0 };
+          region.extent         = cExtent;
 
-        ctx->resolveDepthStencilImage(cDstImage, cSrcImage, region, resolveMode, resolveMode);
+          ctx->resolveDepthStencilImage(cDstImage, cSrcImage, region, resolveMode, resolveMode);
+        }
       });
     }
 
