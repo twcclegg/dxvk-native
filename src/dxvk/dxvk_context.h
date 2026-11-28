@@ -1236,7 +1236,8 @@ namespace dxvk {
     void flushSharedImages();
 
     void startRenderPass();
-    void spillRenderPass(bool suspend);
+    void spillRenderPass(bool suspend,
+      const char* caller = __builtin_FUNCTION(), int line = __builtin_LINE());
     
     void renderPassBindFramebuffer(
       const Rc<DxvkFramebuffer>&  framebuffer,
