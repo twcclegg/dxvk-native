@@ -1,3 +1,4 @@
+#include <chrono>
 #include "d3d9_shader.h"
 
 #include "d3d9_device.h"
@@ -96,7 +97,13 @@ namespace dxvk {
     const D3D9ConstantLayout& constantLayout = ShaderStage == VK_SHADER_STAGE_VERTEX_BIT
       ? pDevice->GetVertexConstantLayout()
       : pDevice->GetPixelConstantLayout();
+    // Apple port, LB_PIPE_STAGES=1: how long each shader the game creates takes to translate from DXSO to SPIR-V
+    static const bool stageLog = env::getEnvVar("LB_PIPE_STAGES") == "1";
+    const auto tc0 = stageLog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
     m_shaders      = pModule->compile(*pDxsoModuleInfo, name, AnalysisInfo, constantLayout);
+    if (stageLog)
+      std::fprintf(stderr, "dxso compile: %s %.2f ms %s\n", ShaderStage == VK_SHADER_STAGE_VERTEX_BIT ? "vs" : "ps",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc0).count(), name.c_str());
     m_isgn         = pModule->isgn();
     m_usedSamplers = pModule->usedSamplers();
 

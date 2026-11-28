@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,14 @@
 #include "dxvk_pipemanager.h"
 #include "dxvk_spec_const.h"
 #include "dxvk_state_cache.h"
+
+// Apple port, LB_PIPE_STAGES: MoltenVK's performance statistics, in the layout of the MoltenVK built against
+#if defined(__APPLE__) && defined(__has_include)
+#  if __has_include(<MoltenVK/mvk_private_api.h>)
+#    include <MoltenVK/mvk_private_api.h>
+#    define DXVK_HAS_MVK_STATS 1
+#  endif
+#endif
 
 namespace dxvk {
 
@@ -79,6 +88,72 @@ namespace dxvk {
   static double pipeNowMs() {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
+
+  /* Apple port, LB_PIPE_STAGES=1 (diagnostic, off by default): where one graphics pipeline compile's time goes.
+   * One stderr line per pipeline compile: DXVK's own work (shader modules: SPIR-V patching plus
+   * vkCreateShaderModule), the whole vkCreateGraphicsPipelines call, and MoltenVK's own activity counters
+   * (MVK_CONFIG_PERFORMANCE_TRACKING=1) diffed across the shader modules and the call: shader hashing, SPIR-V to
+   * MSL, MSL to MTLLibrary, shader library lookup in the VkPipelineCache (recorded only on a hit, and including
+   * the wait for that cache's lock), MTLFunction retrieval and specialization, render pipeline state. The line
+   * ends with the pipeline's LB_PIPE_LOG=2 key. MoltenVK's counters are per device, and DXVK's meta and compute
+   * pipelines and MoltenVK's internal ones feed them too, so a line says "solo" only when no other graphics
+   * pipeline compile overlapped it and its counts fit one pipeline with its stages; otherwise "overlap". */
+  static bool pipeStagesEnabled() {
+    static const bool on = env::getEnvVar("LB_PIPE_STAGES") == "1";
+    return on;
+  }
+
+#ifdef DXVK_HAS_MVK_STATS
+  // MoltenVK registers vkGetPerformanceStatisticsMVK as an instance-level entry point
+  static PFN_vkGetPerformanceStatisticsMVK mvkGetPerf(const DxvkDevice* device) {
+    static PFN_vkGetPerformanceStatisticsMVK fn = reinterpret_cast<PFN_vkGetPerformanceStatisticsMVK>(
+      device->adapter()->vki()->sym("vkGetPerformanceStatisticsMVK"));
+    return fn;
+  }
+
+  // False when MoltenVK gives no statistics, or not in the layout this was built against (VK_INCOMPLETE)
+  static bool mvkReadStats(const DxvkDevice* device, VkDevice vkDevice, MVKPerformanceStatistics* stats) {
+    auto fn = mvkGetPerf(device);
+    if (!fn)
+      return false;
+
+    size_t size = sizeof(*stats);  // MoltenVK writes back the size it copied
+    VkResult vr = fn(vkDevice, stats, &size);
+
+    if (vr != VK_SUCCESS) {
+      static std::atomic<bool> warned = { false };
+      if (!warned.exchange(true))
+        std::fprintf(stderr, "pipe stages: MoltenVK statistics unavailable (VkResult %d), lines say mvk n/a\n", int(vr));
+      return false;
+    }
+
+    return true;
+  }
+
+  static double mvkTotal(const MVKPerformanceTracker& t) { return t.average * double(t.count); }
+#endif
+
+  // Graphics pipeline compiles started (high 32 bits) and in flight (low 32 bits), in one atomic so that a
+  // compile reads both at the same instant
+  static std::atomic<uint64_t> g_stageCounts = { 0u };
+  static constexpr uint64_t StageStart = (uint64_t(1) << 32) | 1u;
+
+  // Ends a compile's in-flight count however createPipeline leaves (createShaderModule can throw)
+  struct StageInflightGuard {
+    bool active = false;
+
+    uint64_t end() {
+      active = false;
+      return g_stageCounts.fetch_sub(1u);
+    }
+
+    ~StageInflightGuard() {
+      if (active)
+        g_stageCounts.fetch_sub(1u);
+    }
+  };
+
+  static thread_local bool t_stageAtDraw = false;
 
 
   bool dxvkPipelineNormalizeEnabled() {
@@ -182,7 +257,9 @@ namespace dxvk {
       if (!instance) {
         // Keep pipeline object locked, at worst we're going to stall
         // a state cache worker and the current thread needs priority.
+        t_stageAtDraw = true;
         instance = this->createInstance(state, renderPass);
+        t_stageAtDraw = false;
         if (pipeLogEnabled()) {
           const double ms = pipeNowMs() - t0;
           std::fprintf(stderr, "pipe compiled at draw: %.1f ms (lock wait %.1f ms) %s\n", ms, lockWaitMs,
@@ -311,18 +388,39 @@ namespace dxvk {
     
     VkSpecializationInfo specInfo = specData.getSpecInfo();
     
+    const bool stages = pipeStagesEnabled();
+    StageInflightGuard stageGuard;
+    uint64_t stageCounts0 = 0;
+    double ts0 = 0.0, ts1 = 0.0;
+#ifdef DXVK_HAS_MVK_STATS
+    MVKPerformanceStatistics mvk0 = { }, mvk1 = { };
+    bool mvkOk = false;
+#endif
+
+    if (stages) {
+      stageCounts0 = g_stageCounts.fetch_add(StageStart);
+      stageGuard.active = true;
+#ifdef DXVK_HAS_MVK_STATS
+      mvkOk = mvkReadStats(m_pipeMgr->m_device, m_vkd->device(), &mvk0);
+#endif
+      ts0 = pipeNowMs();
+    }
+
     auto vsm  = createShaderModule(m_shaders.vs,  state, passFormat.viewMask);
     auto tcsm = createShaderModule(m_shaders.tcs, state, passFormat.viewMask);
     auto tesm = createShaderModule(m_shaders.tes, state, passFormat.viewMask);
     auto gsm  = createShaderModule(m_shaders.gs,  state, passFormat.viewMask);
     auto fsm  = createShaderModule(m_shaders.fs,  state, passFormat.viewMask);
 
-    std::vector<VkPipelineShaderStageCreateInfo> stages;
-    if (vsm)  stages.push_back(vsm.stageInfo(&specInfo));
-    if (tcsm) stages.push_back(tcsm.stageInfo(&specInfo));
-    if (tesm) stages.push_back(tesm.stageInfo(&specInfo));
-    if (gsm)  stages.push_back(gsm.stageInfo(&specInfo));
-    if (fsm)  stages.push_back(fsm.stageInfo(&specInfo));
+    if (stages)
+      ts1 = pipeNowMs();
+
+    std::vector<VkPipelineShaderStageCreateInfo> stageInfos;
+    if (vsm)  stageInfos.push_back(vsm.stageInfo(&specInfo));
+    if (tcsm) stageInfos.push_back(tcsm.stageInfo(&specInfo));
+    if (tesm) stageInfos.push_back(tesm.stageInfo(&specInfo));
+    if (gsm)  stageInfos.push_back(gsm.stageInfo(&specInfo));
+    if (fsm)  stageInfos.push_back(fsm.stageInfo(&specInfo));
 
     // Fix up color write masks using the component mappings
     std::array<VkPipelineColorBlendAttachmentState, MaxNumRenderTargets> omBlendAttachments;
@@ -517,8 +615,8 @@ namespace dxvk {
     info.sType                    = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     info.pNext                    = nullptr;
     info.flags                    = 0;
-    info.stageCount               = stages.size();
-    info.pStages                  = stages.data();
+    info.stageCount               = stageInfos.size();
+    info.pStages                  = stageInfos.data();
     info.pVertexInputState        = &viInfo;
     info.pInputAssemblyState      = &iaInfo;
     info.pTessellationState       = &tsInfo;
@@ -544,8 +642,54 @@ namespace dxvk {
       t0 = dxvk::high_resolution_clock::now();
     
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
-          m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline) != VK_SUCCESS) {
+    const double ts2 = stages ? pipeNowMs() : 0.0;
+    VkResult vr = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
+      m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline);
+
+    if (stages) {
+      const double ts3 = pipeNowMs();
+#ifdef DXVK_HAS_MVK_STATS
+      mvkOk = mvkOk && mvkReadStats(m_pipeMgr->m_device, m_vkd->device(), &mvk1);
+#endif
+      const uint64_t stageCounts1 = stageGuard.end();
+
+      // No other graphics pipeline compile was in flight when this one started, and none started since
+      bool solo = uint32_t(stageCounts0) == 0 && (stageCounts1 >> 32) == (stageCounts0 >> 32) + 1;
+      std::string mvk = "mvk n/a";
+
+#ifdef DXVK_HAS_MVK_STATS
+      if (mvkOk) {
+        const MVKShaderCompilationPerformance& a = mvk0.shaderCompilation;
+        const MVKShaderCompilationPerformance& b = mvk1.shaderCompilation;
+        auto d  = [] (const MVKPerformanceTracker& x, const MVKPerformanceTracker& y) { return mvkTotal(y) - mvkTotal(x); };
+        auto dn = [] (const MVKPerformanceTracker& x, const MVKPerformanceTracker& y) { return y.count - x.count; };
+
+        // More MoltenVK work than one pipeline with these stages needs: something else compiled meanwhile
+        const uint32_t n = uint32_t(stageInfos.size());
+        if (dn(a.spirvToMSL, b.spirvToMSL) > n || dn(a.mslCompile, b.mslCompile) > n
+         || dn(a.functionRetrieval, b.functionRetrieval) > n || dn(a.pipelineCompile, b.pipelineCompile) > 1)
+          solo = false;
+
+        char buf[256];
+        std::snprintf(buf, sizeof(buf), "hash %.2f s2m %.2f/%u msl %.2f/%u lib %.2f/%u fret %.2f/%u fspec %.2f/%u pso %.2f/%u",
+          d(a.hashShaderCode, b.hashShaderCode),
+          d(a.spirvToMSL, b.spirvToMSL), dn(a.spirvToMSL, b.spirvToMSL),
+          d(a.mslCompile, b.mslCompile), dn(a.mslCompile, b.mslCompile),
+          d(a.shaderLibraryFromCache, b.shaderLibraryFromCache), dn(a.shaderLibraryFromCache, b.shaderLibraryFromCache),
+          d(a.functionRetrieval, b.functionRetrieval), dn(a.functionRetrieval, b.functionRetrieval),
+          d(a.functionSpecialization, b.functionSpecialization), dn(a.functionSpecialization, b.functionSpecialization),
+          d(a.pipelineCompile, b.pipelineCompile), dn(a.pipelineCompile, b.pipelineCompile));
+        mvk = buf;
+      }
+#endif
+
+      std::fprintf(stderr, "pipe stages: %s t %.0f total %.2f spv %.2f vk %.2f | %s | %s vm %u key %s\n",
+        t_stageAtDraw ? "draw" : "ahead", ts0, ts3 - ts0, ts1 - ts0, ts3 - ts2, mvk.c_str(),
+        solo ? "solo" : "overlap", passFormat.viewMask,
+        DxvkStateCache::pipelineKey(getStateCacheKey(), state, passFormat).c_str());
+    }
+
+    if (vr != VK_SUCCESS) {
       Logger::err("DxvkGraphicsPipeline: Failed to compile pipeline");
       this->logPipelineState(LogLevel::Error, state);
       return VK_NULL_HANDLE;
