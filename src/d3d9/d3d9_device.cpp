@@ -4038,12 +4038,15 @@ namespace dxvk {
     }
 
     // Apple port (stereo): single-pass stereo, only on request (dxso_util.h, DxsoStereoMultiviewRequested).
+    // Without layered rendering (maxFramebufferLayers < 2, see DxsoOptions) stereo stays mono, so leave multiview
+    // off too: the device then matches one without multiview (single-slot queries, no multiview state-cache entries).
     if (DxsoStereoMultiviewRequested()) {
-      enabled.coreMultiview.multiview = supported.coreMultiview.multiview;
+      const bool layered = adapter->devicePropertiesExt().core.properties.limits.maxFramebufferLayers >= 2;
+      enabled.coreMultiview.multiview = supported.coreMultiview.multiview && layered;
 
       if (!supported.coreMultiview.multiview)
         Logger::err("D3D9: LB_STEREO_MULTIVIEW=1 but the Vulkan device has no multiview; rendering mono");
-      else if (adapter->devicePropertiesExt().core.properties.limits.maxFramebufferLayers < 2)
+      else if (!layered)
         Logger::err("D3D9: LB_STEREO_MULTIVIEW=1 but the Vulkan device has no layered rendering"
                     " (maxFramebufferLayers < 2, e.g. the visionOS simulator); rendering mono");
     }

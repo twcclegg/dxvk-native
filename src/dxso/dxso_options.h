@@ -56,7 +56,8 @@ namespace dxvk {
     bool alphaTestWiggleRoom;
 
     /// Apple port (stereo): vertex shaders read a per-view eye offset at gl_ViewIndex
-    /// (LB_STEREO_MULTIVIEW and the device's multiview feature, dxso_util.h)
+    /// (LB_STEREO_MULTIVIEW, the device's multiview feature and layered rendering, i.e.
+    /// maxFramebufferLayers >= 2; dxso_util.h)
     bool stereoMultiview = false;
   };
 

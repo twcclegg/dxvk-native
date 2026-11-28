@@ -91,7 +91,8 @@ namespace dxvk {
   constexpr uint32_t DxsoStereoClipShiftIndex = 6;
 
   /* Apple port experiment: single-pass stereo with Vulkan multiview (include/native/dxvk_stereo.h).
-   * LB_STEREO_MULTIVIEW=1 at launch, read once per process. When the Vulkan device also supports multiview:
+   * LB_STEREO_MULTIVIEW=1 at launch, read once per process. When the Vulkan device also supports multiview and
+   * layered rendering (maxFramebufferLayers >= 2; otherwise everything stays mono):
    *   - the D3D9 device enables VkPhysicalDeviceMultiviewFeatures::multiview;
    *   - render targets and depth-stencil surfaces with the back buffer's exact size get two image layers
    *     (D3D9CommonTexture, IsStereoMultiviewTarget) and render passes whose attachments all have two layers
