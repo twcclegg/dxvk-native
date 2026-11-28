@@ -3,6 +3,10 @@
 #include "d3d9_device.h"
 #include "d3d9_util.h"
 
+#include "../dxvk/dxvk_state_cache.h"
+
+#include <cstdio>
+
 namespace dxvk {
 
 #ifndef DXVK_NATIVE
@@ -409,7 +413,17 @@ namespace dxvk {
 
     std::lock_guard<dxvk::mutex> lock(m_cacheMutex);
 
-    if (!m_cachedKeys.insert(Key).second || !m_cacheFile.is_open())
+    if (!m_cachedKeys.insert(Key).second)
+      return;
+
+    // LB_PIPE_LOG=2: a shader no earlier run created, so the state cache can't have compiled its pipelines
+    if (dxvkPipeLogLevel() >= 2) {
+      std::fprintf(stderr, "dxso shader new this run: %s %s, %u bytes\n",
+        ShaderStage == VK_SHADER_STAGE_VERTEX_BIT ? "vs" : "ps",
+        Key.sha1().toString().substr(0, 8).c_str(), ByteLength);
+    }
+
+    if (!m_cacheFile.is_open())
       return;
 
     D3D9BytecodeCacheEntryHeader entry;
