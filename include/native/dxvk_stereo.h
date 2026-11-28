@@ -16,7 +16,8 @@
  * Single-pass stereo (multiview): with LB_STEREO_MULTIVIEW=1 at launch (read once) and a Vulkan device with
  * multiview, both eyes come from ONE submission of each draw:
  *   - render targets and depth-stencil surfaces created with the back buffer's exact size (not the back buffer
- *     itself; not multisampled, cube, volume or array resources) get a second image layer;
+ *     itself; not multisampled, cube, volume or array resources; not created under dxvk_stereo_create_mono) get a
+ *     second image layer;
  *   - a pass renders with view mask 0b11 (view i into layer i) when every bound attachment has two layers;
  *     otherwise it is an ordinary mono pass that renders layer 0, as before;
  *   - the vertex shader subtracts the offset of its own view: view 0's in mono passes.
@@ -65,6 +66,10 @@ void dxvk_stereo_set_view_ui_offsets(const float view0[4], const float view1[4])
  * render target of the same size (every layer both have), on the GPU: replaces a pass that redraws the scene only
  * to get its depth into a sampleable target. Returns an HRESULT. */
 long dxvk_copy_depth_to_float(void* device, void* depthStencil, void* floatTarget);
+/* While on (non-zero), render targets and depth-stencil surfaces created on the calling thread get one layer even
+ * when they have the back buffer's size, so passes into them stay mono. For a target that only one view should
+ * fill, such as an interface drawn once as a flat layer. Turn it off again right after the creation call. */
+void dxvk_stereo_create_mono(int on);
 /* 1 when LB_STEREO_EYE_UNITS or LB_STEREO_MULTIVIEW turned the shader code on, else 0 (and set_clip_shift does
  * nothing visible). */
 int dxvk_stereo_enabled(void);

@@ -1093,12 +1093,17 @@ namespace dxvk {
     D3D9PresentTapState* state = m_presentTapState.ptr();
     state->hasHud[Slot] = false;
 
-    // The interface drawn on its own (runtime LB_HUD_LAYER): a single-sample 8-bit RGBA colour target.
+    // The interface drawn on its own (runtime LB_HUD_LAYER): a single-sample 8-bit RGBA colour target with a real
+    // alpha channel (X8R8G8B8 maps to the same Vulkan format but its alpha is undefined), and a surface that is the
+    // whole of its texture (no mip level or cube face of a larger one), so the image's extent is the surface's.
     IDirect3DSurface9* named = g_presentTapHud.load(std::memory_order_acquire);
     if (named == nullptr)
       return;
     D3D9CommonTexture* texture = static_cast<D3D9Surface*>(named)->GetCommonTexture();
-    if (texture == nullptr)
+    if (texture == nullptr || texture->CountSubresources() != 1)
+      return;
+    const D3D9Format d3dFormat = texture->Desc()->Format;
+    if (d3dFormat != D3D9Format::A8R8G8B8 && d3dFormat != D3D9Format::A8B8G8R8)
       return;
     Rc<DxvkImage> hud = texture->GetImage();
     if (hud == nullptr)
@@ -1131,6 +1136,7 @@ namespace dxvk {
       state->hudImages[Slot] = m_device->createImage(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     }
 
+    // Layer 0 only: a target with a second stereo layer (created without dxvk_stereo_create_mono) hands on view 0.
     VkImageSubresourceLayers layers = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     m_context->copyImage(
       state->hudImages[Slot], layers, VkOffset3D { 0, 0, 0 },
