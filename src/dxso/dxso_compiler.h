@@ -273,6 +273,10 @@ namespace dxvk {
     const D3D9ConstantLayout*  m_layout;
 
     DxsoShaderMetaInfo         m_meta;
+
+    // LB_STEREO_REBUILD: the inverse camera matrix's first float constant, and the device-filled data's (0: off)
+    uint32_t                   m_stereoRebuildBase = 0;
+    uint32_t                   m_stereoRebuildData = 0;
     DxsoDefinedConstants       m_constants;
 
     SpirvModule                m_module;
@@ -660,6 +664,17 @@ namespace dxvk {
     /* The layer an arrayed sampler reads: gl_ViewIndex when bit 16 + slot of s_depth_filter is set (a two-layer
      * stereo texture is bound), else 0. */
     uint32_t emitStereoLayer(uint32_t samplerIdx);
+
+    /* gl_ViewIndex as an input variable of the pixel shader, declared on first use. */
+    uint32_t emitViewIndexVar();
+
+    /* Multiview: a full-screen pass (w == 1, so no per-eye shift) that rebuilds positions from a per-eye depth
+     * texture with the game's single inverse camera reads the wrong place in each eye. For the shaders named in
+     * LB_STEREO_REBUILD, the vector each dp4 with that inverse matrix's rows multiplies is first taken from the
+     * eye's clip space back to the game camera's: v' = inverse(M[view]) * (v + shift[view] * dot(row3, v)), with
+     * M and shift as the vertex shader applies them (clip' = M * clip - shift) and row3 * v = 1 / w. The device
+     * fills inverse(M) and shift for both views into 10 spare float constants (meta.stereoRebuildData). */
+    DxsoRegisterValue emitStereoRebuild(DxsoRegisterValue v);
 
     uint32_t emitSample(
             bool                    projected,

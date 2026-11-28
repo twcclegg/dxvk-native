@@ -853,6 +853,12 @@ namespace dxvk {
 
     void UpdateStereoClipShift();
 
+    /* LB_STEREO_REBUILD (DxsoCompiler::emitStereoRebuild): the per-view correction for a pixel shader that rebuilds
+     * positions from depth, written over float constants [Data, Data + 10) of the upload: the rows of
+     * inverse(M[0]), the rows of inverse(M[1]), then shift[0] and shift[1], from the stereo state bound for the
+     * draw. */
+    void FillStereoRebuild(Vector4* pData) const;
+
     /* Apple port (stereo): GetRenderTargetData from one layer of the render target's image (debug and tests,
      * dxvk_stereo_get_render_target_data_layer). Layer 0 is exactly GetRenderTargetData. */
     HRESULT GetRenderTargetDataLayer(

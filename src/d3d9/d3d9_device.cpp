@@ -5098,8 +5098,13 @@ namespace dxvk {
       ctx->invalidateBuffer(cBuffer, cSlice);
     });
 
-    if constexpr (ShaderStage == DxsoProgramType::PixelShader)
+    if constexpr (ShaderStage == DxsoProgramType::PixelShader) {
       UploadHardwareConstantSet<ShaderStage, HardwareLayoutType>(slice.mapPtr, Src, Shader);
+#ifdef __APPLE__
+      if (unlikely(constSet.meta.stereoRebuildData))
+        FillStereoRebuild(reinterpret_cast<HardwareLayoutType*>(slice.mapPtr)->fConsts + constSet.meta.stereoRebuildData);
+#endif
+    }
     else if (likely(!CanSWVP()))
       UploadHardwareConstantSet<ShaderStage, HardwareLayoutType>(slice.mapPtr, Src, Shader);
     else
@@ -5283,6 +5288,46 @@ namespace dxvk {
       m_stereoClipMatrixBound = m;
       m_stereoUiShiftBound = u;
       m_flags.set(D3D9DeviceFlag::DirtyClipPlanes);
+    }
+  }
+
+
+  void D3D9DeviceEx::FillStereoRebuild(Vector4* pData) const {
+    for (uint32_t view = 0; view < 2; view++) {
+      // M is stored as the vertex shader reads it, column-major: m[col * 4 + row]
+      const auto& m = m_stereoClipMatrixBound[view];
+      double a[4][8];
+      for (uint32_t r = 0; r < 4; r++)
+        for (uint32_t c = 0; c < 8; c++)
+          a[r][c] = c < 4 ? double(m[c * 4 + r]) : (c - 4 == r ? 1.0 : 0.0);
+      bool ok = true;
+      for (uint32_t c = 0; c < 4 && ok; c++) {  // Gauss-Jordan with partial pivoting
+        uint32_t p = c;
+        for (uint32_t r = c + 1; r < 4; r++)
+          if (std::abs(a[r][c]) > std::abs(a[p][c])) p = r;
+        if (std::abs(a[p][c]) < 1e-12) { ok = false; break; }
+        if (p != c)
+          for (uint32_t k = 0; k < 8; k++) std::swap(a[p][k], a[c][k]);
+        const double inv = 1.0 / a[c][c];
+        for (uint32_t k = 0; k < 8; k++) a[c][k] *= inv;
+        for (uint32_t r = 0; r < 4; r++) {
+          if (r == c || a[r][c] == 0.0) continue;
+          const double f = a[r][c];
+          for (uint32_t k = 0; k < 8; k++) a[r][k] -= f * a[c][k];
+        }
+      }
+      for (uint32_t r = 0; r < 4; r++) {  // row r of the inverse
+        Vector4& row = pData[view * 4 + r];
+        for (uint32_t c = 0; c < 4; c++)
+          row.data[c] = ok ? float(a[r][4 + c]) : (r == c ? 1.0f : 0.0f);
+      }
+      if (!ok) {
+        static bool warned = false;
+        if (!std::exchange(warned, true))
+          Logger::warn("LB_STEREO_REBUILD: a per-view clip matrix has no inverse; that view is left uncorrected");
+      }
+      const auto& k = m_stereoClipShiftBound[view];
+      pData[8 + view] = Vector4(k[0], k[1], k[2], k[3]);
     }
   }
 
@@ -6454,6 +6499,11 @@ namespace dxvk {
     };
 
     if (likely(UseProgrammablePS())) {
+#ifdef __APPLE__
+      // LB_STEREO_REBUILD: the correction follows the stereo state, which changes without a constant write
+      if (unlikely(m_consts[DxsoProgramType::PixelShader].meta.stereoRebuildData))
+        m_consts[DxsoProgramType::PixelShader].dirty = true;
+#endif
       UploadConstants<DxsoProgramTypes::PixelShader>();
 
       const uint32_t psTextureMask = usedTextureMask & ((1u << 16u) - 1u);
