@@ -792,6 +792,31 @@ namespace dxvk {
 
     void BindFramebuffer();
 
+    /* Apple port, LB_RP_SHADOW_DS=1: see D3D9DeviceEx::ShadowDepthView. */
+    Rc<DxvkImageView> ShadowDepthView();
+
+    bool ShadowDepthClear(
+      const Rc<DxvkImageView>& view,
+            uint32_t           alignment,
+            VkOffset3D         offset,
+            VkExtent3D         extent,
+            VkImageAspectFlags aspects);
+
+    void ShadowDepthCheckDraw();
+
+    void ShadowDepthRefuse(VkExtent3D size, const char* reason);
+
+    /* A render target or depth-stencil binding changed: the private surface, if any, is undefined again. */
+    void ShadowDepthBindingChanged() {
+      m_shadowDepthCleared = false;
+      m_shadowDepthRefused = false;
+    }
+
+    std::vector<Rc<DxvkImageView>>  m_shadowDepthViews;
+    Rc<DxvkImageView>               m_shadowDepthBound;            // private surface of the bound framebuffer, or null
+    bool                            m_shadowDepthCleared = false;  // it had a full clear since the binding changed
+    bool                            m_shadowDepthRefused = false;  // this binding uses the scene surface
+
     void BindViewportAndScissor();
 
     inline bool IsAlphaToCoverageEnabled() {

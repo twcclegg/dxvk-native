@@ -2239,6 +2239,59 @@ namespace dxvk {
   }
 
 
+  void DxvkContext::replaceBuffer(
+    const Rc<DxvkBuffer>&           buffer,
+    const DxvkBufferSlice&          source) {
+    // A short source would leave the tail of a new slice with a recycled slice's old data
+    if (unlikely(source.length() < buffer->info().size)) {
+      Logger::err(str::format("DxvkContext::replaceBuffer: source has ", source.length(),
+        " bytes for a buffer of ", buffer->info().size));
+    }
+
+    // Same reason as in updateBuffer: keep bound transform feedback counters intact
+    if (m_flags.test(DxvkContextFlag::GpXfbActive))
+      this->spillRenderPass(true);
+
+    // Without an open render pass a copy into the current slice costs no pass end, and a rename
+    // would only allocate another slice (most uploads happen while a level loads).
+    if (!m_flags.test(DxvkContextFlag::GpRenderPassBound)) {
+      this->copyBuffer(buffer, 0, source.buffer(), source.offset(),
+        std::min<VkDeviceSize>(source.length(), buffer->info().size));
+      return;
+    }
+
+    // A buffer that nothing recorded or in flight uses can be filled in place, which is the
+    // common case while a level loads; otherwise earlier draws must keep their slice.
+    DxvkBufferSliceHandle dstSlice;
+
+    if (buffer->isInUse()) {
+      dstSlice = buffer->allocSlice();
+      this->invalidateBuffer(buffer, dstSlice);
+    } else {
+      dstSlice = buffer->getSliceHandle();
+    }
+
+    DxvkBufferSliceHandle srcSlice = source.getSliceHandle();
+
+    VkBufferCopy region;
+    region.srcOffset = srcSlice.offset;
+    region.dstOffset = dstSlice.offset;
+    region.size      = std::min(srcSlice.length, dstSlice.length);
+
+    m_cmd->cmdCopyBuffer(DxvkCmdBuffer::InitBuffer,
+      srcSlice.handle, dstSlice.handle, 1, &region);
+
+    m_initBarriers.accessBuffer(dstSlice,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_ACCESS_TRANSFER_WRITE_BIT,
+      buffer->info().stages,
+      buffer->info().access);
+
+    m_cmd->trackResource<DxvkAccess::Read>(source.buffer());
+    m_cmd->trackResource<DxvkAccess::Write>(buffer);
+  }
+
+
   void DxvkContext::updateBuffer(
     const Rc<DxvkBuffer>&           buffer,
           VkDeviceSize              offset,
