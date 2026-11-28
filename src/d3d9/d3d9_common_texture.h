@@ -344,8 +344,9 @@ namespace dxvk {
     /* Apple port (stereo): replaces the image of a one-layer target with a new one of `Layers` layers, as if
      * GetStereoLayerCount had given it that many, and remakes the sampling views. The contents are lost; the
      * caller clears the subresources' cached views and initialises the new image (D3D9DeviceEx::MakeStereoLayered).
-     * False, with nothing changed, if the image cannot be made. */
-    bool MakeStereoLayered(uint32_t Layers);
+     * On failure nothing is changed: D3DERR_NOTAVAILABLE if the image or its views cannot be made (the error is
+     * logged), D3DERR_OUTOFVIDEOMEMORY if memory tracking (memoryTrackTest) has no room for it. */
+    HRESULT MakeStereoLayered(uint32_t Layers);
 
     VkImageLayout DetermineRenderTargetLayout() const {
       return m_image != nullptr &&

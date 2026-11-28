@@ -304,7 +304,7 @@ namespace dxvk {
                     "x", m_desc.Height,
                     "x", m_desc.Depth,
         "\n  Samples: ", m_desc.MultiSample,
-        "\n  Layers:  ", m_desc.ArraySize,
+        "\n  Layers:  ", m_desc.ArraySize * m_stereoLayers,
         "\n  Levels:  ", m_desc.MipLevels,
         "\n  Usage:   ", std::hex, m_desc.Usage,
         "\n  Pool:    ", std::hex, m_desc.Pool));
@@ -542,33 +542,47 @@ namespace dxvk {
   }
 
 
-  bool D3D9CommonTexture::MakeStereoLayered(uint32_t Layers) {
-    const uint32_t oldLayers = m_stereoLayers;
-    Rc<DxvkImage> image;
+  HRESULT D3D9CommonTexture::MakeStereoLayered(uint32_t Layers) {
+    const uint32_t      oldLayers       = m_stereoLayers;
+    Rc<DxvkImage>       oldImage        = m_image;
+    D3D9ColorView       oldSample       = m_sampleView;
+    D3D9ColorView       oldSampleStereo = m_sampleViewStereo;
 
+    auto restore = [&] () {
+      m_stereoLayers     = oldLayers;
+      m_image            = std::move(oldImage);
+      m_sampleView       = std::move(oldSample);
+      m_sampleViewStereo = std::move(oldSampleStereo);
+    };
+
+    // Make the new image and its views first; nothing is committed until both exist.
     m_stereoLayers = Layers;
     try {
-      image = CreatePrimaryImage(m_type, false);
+      m_image            = CreatePrimaryImage(m_type, false);
+      m_sampleView       = D3D9ColorView();
+      m_sampleViewStereo = D3D9ColorView();
+      CreateSampleView(0);
     } catch (const DxvkError& e) {
       Logger::err(e.message());
-      m_stereoLayers = oldLayers;
-      return false;
+      restore();
+      return D3DERR_NOTAVAILABLE;
     }
-
-    if (m_size != 0)
-      m_device->ChangeReportedMemory(m_size);
-
-    m_image = std::move(image);
-    m_sampleView = D3D9ColorView();
-    m_sampleViewStereo = D3D9ColorView();
-    CreateSampleView(0);
 
     if (!IsManaged()) {
-      m_size = m_image->memSize();
-      m_device->ChangeReportedMemory(-m_size);
+      const int64_t newSize = m_image->memSize();
+      if (!m_device->ChangeReportedMemory(m_size - newSize)) {
+        m_device->ChangeReportedMemory(newSize - m_size);
+        Logger::err("D3D9: stereo: no reported memory left for a second layer");
+        restore();
+        return D3DERR_OUTOFVIDEOMEMORY;
+      }
+      m_size = newSize;
+    } else if (m_size != 0) {
+      m_device->ChangeReportedMemory(m_size);
+      m_size = 0;
     }
 
-    return true;
+    return D3D_OK;
   }
 
 
