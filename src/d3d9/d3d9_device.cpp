@@ -7899,8 +7899,16 @@ namespace dxvk {
     // image -> buffer -> image. It needs the layer from the vertex shader (no geometry shaders on Metal) and a
     // target it can render to directly (else copyImageFb renders into a temporary image and copies again).
     static const bool s_fb = [] { const char* e = std::getenv("LB_DEPTH_COPY_FB"); return e && *e == '1'; }();
-    if (s_fb && m_dxvkDevice->extensions().extShaderViewportIndexLayer
-     && (di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+    const bool fb = s_fb && m_dxvkDevice->extensions().extShaderViewportIndexLayer
+      && (di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+      && layers <= m_dxvkDevice->properties().core.properties.limits.maxFramebufferLayers;
+    static bool s_logged = false;
+    if (s_fb && !s_logged) {
+      s_logged = true;
+      Logger::info(fb ? "LB_DEPTH_COPY_FB: depth copied with a shader draw"
+                      : "LB_DEPTH_COPY_FB: not usable here (no layer from the vertex shader, no render-target usage or too many layers); buffer copy");
+    }
+    if (fb) {
       EmitCs([
         cSrc    = srcImage,
         cDst    = dstImage,
