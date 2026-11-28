@@ -1,7 +1,7 @@
 /* Apple port (twcclegg/dxvk-native): DXVK present tap for the visionOS compositor (Apple builds only).
  *
  * Off unless LB_PRESENT_TAP=1 is set and a callback is registered. When on, every D3D9 Present also copies the
- * back buffer into one of three tap-owned Vulkan images, inside DXVK's own command list, so it is ordered after
+ * back buffer into one of five tap-owned Vulkan images, inside DXVK's own command list, so it is ordered after
  * the frame. Then the callback runs on the presenting (game) thread with that image.
  *
  * Consumer contract:
@@ -37,7 +37,7 @@ typedef struct dxvk_present_tap_frame {
     void    *vk_device;   /* VkDevice */
     void    *vk_queue;    /* VkQueue DXVK presents on (read only: never submit to it) */
     uint64_t vk_image;    /* VkImage of the tap slot (a copy, not the back buffer itself) */
-    uint32_t slot;        /* 0..2 */
+    uint32_t slot;        /* 0..4 */
     uint32_t width;
     uint32_t height;
     uint32_t vk_format;   /* VkFormat, normally VK_FORMAT_B8G8R8A8_UNORM */
@@ -54,6 +54,19 @@ typedef struct dxvk_present_tap_frame {
      * depth_layers (0 when there is none). Appended last, so older consumers that ignore them see layer 0. */
     uint32_t layers;
     uint32_t depth_layers;
+    /* The interface drawn on its own for the same frame, when the runtime named one (dxvk_present_tap_set_hud):
+     * a copy of the named target's texels, unchanged, in hud_vk_format (its own 8-bit RGBA UNORM format; the image
+     * is created without MUTABLE_FORMAT, so sample it in that format and decode in the shader). What the texels mean
+     * (colour encoding, straight or premultiplied alpha, what is transparent) is for the runtime that draws the
+     * target to define; DXVK does not touch them. One layer: layer 0 of a two-layer stereo target. The image keeps
+     * its VkImage until the state changes only while the named target keeps its size and format: a runtime that
+     * changes them while the back buffer stays the same gets a new image within the same state, whose handle may
+     * repeat an old one's value. hud_vk_image is 0 otherwise. Same slot, fence and release as the colour image.
+     * Appended last, as the layer counts were. */
+    uint64_t hud_vk_image;
+    uint32_t hud_width;
+    uint32_t hud_height;
+    uint32_t hud_vk_format;
 } dxvk_present_tap_frame;
 
 typedef void (*dxvk_present_tap_fn)(void *user, const dxvk_present_tap_frame *frame);
@@ -69,6 +82,10 @@ int dxvk_present_tap_ready(void *state, uint64_t frame_id);
 /* The D3D9 surface (IDirect3DSurface9 *) holding the scene's depth for the next Present, or NULL. It must stay
  * alive until that Present returns; the runtime sets it right before each Present and clears it after. */
 void dxvk_present_tap_set_depth(void *surface);
+/* The D3D9 surface (IDirect3DSurface9 *) holding the interface for the next Present, drawn there instead of into
+ * the back buffer, or NULL. It must be a whole single-sample A8R8G8B8 or A8B8G8R8 render target (not a mip level
+ * or cube face of a larger texture); anything else is not handed on. Same lifetime rule as set_depth. */
+void dxvk_present_tap_set_hud(void *surface);
 /* 1 while the immersive layer is running (tap-only presents), 0 otherwise. Thread-safe; takes effect at the
  * next Present. Off by default. */
 void dxvk_present_tap_set_exclusive(int on);

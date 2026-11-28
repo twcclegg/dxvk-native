@@ -5188,6 +5188,8 @@ namespace dxvk {
     // Per-view clip-space matrices, column-major (clip' = M * clip): identity unless set.
     std::array<std::array<float, 16>, 2> g_stereoClipMatrix = {{
       {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }}, {{ 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }} }};
+    // dxvk_stereo_create_mono: surfaces and textures created on this thread while set get one layer.
+    thread_local bool                   g_stereoCreateMono = false;
   }
 
 
@@ -5197,7 +5199,7 @@ namespace dxvk {
     // must stay mono). The back buffer itself stays single-layer, so passes into it stay mono; eye 2 leaves
     // a two-layer target only through dxvk_stereo_get_render_target_data_layer for now (later chunks: layer
     // aware copies and presentation). Multisampled targets, cube maps, volumes and arrays are left alone.
-    if (likely(!IsStereoMultiview()))
+    if (likely(!IsStereoMultiview()) || g_stereoCreateMono)
       return 1;
 
     // LB_STEREO_PRESENT=1 (3.8): the back buffer has two layers too, so the game's final composite and interface
@@ -7839,6 +7841,11 @@ extern "C" void dxvk_stereo_set_view_clip_matrices(const float view0[16], const 
     dxvk::g_stereoClipMatrix[0][i] = view0[i];
     dxvk::g_stereoClipMatrix[1][i] = view1[i];
   }
+}
+
+
+extern "C" void dxvk_stereo_create_mono(int on) {
+  dxvk::g_stereoCreateMono = on != 0;
 }
 
 
