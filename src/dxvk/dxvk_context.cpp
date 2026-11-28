@@ -20,18 +20,35 @@
 
 namespace dxvk {
 
-  /* Apple port, LB_RP_ENDS=1: counts why render passes end. Each pass that startRenderPass begins is counted
-   * under the spillRenderPass caller (the immediate caller, so all draws share updateFramebuffer's line) that
-   * ended the context's previous such pass: "same" if the new pass uses the same subresources in the same
-   * layouts and loads every attachment (the split stored and reloaded them), else "change". Any other pass in
-   * between (the clear passes of performClear and clearImageViewFb, blits, resolves, mip generation,
-   * copyImageFb) makes the next pass "change". About every 2 s a cumulative stderr line goes between the
+  /* Apple port, LB_RP_ENDS=1: counts why render passes end, to find splits that store and reload the same
+   * attachments. Each pass that startRenderPass begins is counted under the spillRenderPass caller that ended
+   * the context's previous such pass. The caller is the immediate one, so draws land on updateFramebuffer's
+   * line, and so do the partial clears of clearImageViewFb, which calls updateFramebuffer first. A D3D9 Clear
+   * after SetRenderTarget lands on clearRenderTarget's line: Clear does not bind the new framebuffer, so the
+   * clear does not find its view in the old one and spills. That is a render-target change, not a separate cause.
+   *
+   * The new pass is compared with the context's previous startRenderPass pass and counted as one of:
+   * - same: each slot holds the same image through a view with the same format, mip and layers, the view mask
+   *   is the same, and the new pass loads every attachment (depth and, where present, stencil);
+   * - same after another pass: as same, but another render pass ran in between (the clear passes of
+   *   performClear and clearImageViewFb, blits, resolves, mip generation, copyImageFb);
+   * - change: anything else.
+   * "Same" means what a Metal render pass would have to match to carry on. MoltenVK ignores image layouts, so
+   * they are left out: a split that only changes the depth layout still counts as same. The view format is in:
+   * D3D9 binds another view of the same image for SRGBWRITEENABLE, and a Metal attachment cannot change its
+   * pixel format. On Metal any work between two passes ends the render encoder, whether it is a transfer or a
+   * render pass, so both same buckets are same-target splits; the second only says the work in between is a
+   * render pass. Whether that work touches the attachments is not checked.
+   *
+   * Counts are summed over all contexts (the CS thread, the present blit and HUD, the initialisers). The keys
+   * use line numbers in this file, so compare them only between builds of the same source. About every 2 s a
+   * cumulative stderr line "rpends: caller:line=same/same-after-other-pass/change ..." goes between the
    * frame-time lines. */
   namespace {
     struct RpAttachment {
-      const void* image; uint32_t mip, layer, layers; VkImageLayout layout;
+      const void* image; VkFormat format; uint32_t mip, layer, layers;
       bool operator == (const RpAttachment& o) const {
-        return image == o.image && mip == o.mip && layer == o.layer && layers == o.layers && layout == o.layout;
+        return image == o.image && format == o.format && mip == o.mip && layer == o.layer && layers == o.layers;
       }
     };
     using RpSignature = std::array<RpAttachment, MaxNumRenderTargets + 1>;
@@ -40,13 +57,24 @@ namespace dxvk {
       const char* caller = "start";
       int line = 0;
       bool valid = false;
+      bool otherPass = false;
+      uint32_t viewMask = 0;
       RpSignature sig = { };
+    };
+
+    using RpKey = std::pair<const char*, int>;
+
+    struct RpKeyLess {
+      bool operator () (const RpKey& a, const RpKey& b) const {
+        int d = std::strcmp(a.first, b.first);
+        return d ? d < 0 : a.second < b.second;
+      }
     };
 
     struct RpEnds {
       std::mutex mutex;
       std::map<const void*, RpContextState> contexts;
-      std::map<std::pair<std::string, int>, std::array<uint64_t, 2>> count;
+      std::map<RpKey, std::array<uint64_t, 3>, RpKeyLess> count;
       double lastPrint = 0.0;
     };
 
@@ -60,9 +88,9 @@ namespace dxvk {
 
     RpAttachment rpAttachment(const DxvkAttachment& a) {
       if (a.view == nullptr)
-        return RpAttachment { nullptr, 0, 0, 0, VK_IMAGE_LAYOUT_UNDEFINED };
+        return RpAttachment { nullptr, VK_FORMAT_UNDEFINED, 0, 0, 0 };
       const VkImageSubresourceRange sr = a.view->subresources();
-      return RpAttachment { a.view->image().ptr(), sr.baseMipLevel, sr.baseArrayLayer, sr.layerCount, a.layout };
+      return RpAttachment { a.view->image().ptr(), a.view->info().format, sr.baseMipLevel, sr.baseArrayLayer, sr.layerCount };
     }
 
     void rpEndsOnSpill(const void* ctx, const char* caller, int line) {
@@ -77,7 +105,7 @@ namespace dxvk {
     void rpEndsOnMetaPass(const void* ctx) {
       if (RpEnds* r = rpEnds()) {
         std::lock_guard<std::mutex> lock(r->mutex);
-        r->contexts[ctx].valid = false;
+        r->contexts[ctx].otherPass = true;
       }
     }
 
@@ -105,12 +133,16 @@ namespace dxvk {
         if (sig[i + 1].image)
           loads &= ops.colorOps[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD;
       }
+      const uint32_t viewMask = fb.viewMask();
 
-      std::lock_guard<std::mutex> lock(r->mutex);
+      std::unique_lock<std::mutex> lock(r->mutex);
       RpContextState& c = r->contexts[ctx];
-      r->count[{ c.caller, c.line }][c.valid && loads && sig == c.sig ? 0 : 1]++;
+      const bool same = c.valid && loads && sig == c.sig && viewMask == c.viewMask;
+      r->count[{ c.caller, c.line }][!same ? 2 : c.otherPass ? 1 : 0]++;
       c.sig = sig;
+      c.viewMask = viewMask;
       c.valid = true;
+      c.otherPass = false;
       c.caller = "unspilled";
       c.line = 0;
 
@@ -118,9 +150,16 @@ namespace dxvk {
       if (now - r->lastPrint < 2.0)
         return;
       r->lastPrint = now;
+      std::vector<std::pair<RpKey, std::array<uint64_t, 3>>> counts(r->count.begin(), r->count.end());
+      lock.unlock();
+
       std::string out = "rpends:";
-      for (const auto& e : r->count)
-        out += " " + e.first.first + ":" + std::to_string(e.first.second) + "=" + std::to_string(e.second[0]) + "/" + std::to_string(e.second[1]);
+      for (const auto& e : counts) {
+        out += " ";
+        out += e.first.first;
+        out += ":" + std::to_string(e.first.second) + "=" + std::to_string(e.second[0])
+             + "/" + std::to_string(e.second[1]) + "/" + std::to_string(e.second[2]);
+      }
       std::fprintf(stderr, "%s\n", out.c_str());
     }
   }
