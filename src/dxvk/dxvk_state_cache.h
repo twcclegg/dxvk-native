@@ -6,13 +6,24 @@
 #include <mutex>
 #include <queue>
 #include <unordered_map>
+#include <string>
 #include <vector>
+
+#include "../util/util_time.h"
 
 #include "dxvk_state_cache_types.h"
 
 namespace dxvk {
 
   class DxvkDevice;
+
+  /**
+   * \brief Pipeline compile logging level (Apple port)
+   *
+   * \c LB_PIPE_LOG: 0 or unset off; 1 one stderr line per graphics pipeline
+   * compiled, saying why an at-draw compile missed the state cache.
+   */
+  uint32_t dxvkPipeLogLevel();
 
   /**
    * \brief State cache
@@ -84,6 +95,20 @@ namespace dxvk {
       return m_workerBusy.load() > 0;
     }
 
+    /**
+     * \brief Says why a pipeline compiled at draw time was not compiled ahead
+     *
+     * Apple port, LB_PIPE_LOG=1 diagnostics. Looks the pipeline up among the
+     * entries read from the cache file: none with these shaders, an entry
+     * with the same shaders that differs in the named state fields, or an
+     * identical entry (then: how long ago its shaders were registered and
+     * how many pipelines were still queued for the compiler threads).
+     */
+    std::string describeMiss(
+      const DxvkStateCacheKey&              shaders,
+      const DxvkGraphicsPipelineStateInfo&  state,
+      const DxvkRenderPassFormat&           format);
+
   private:
 
     using WriterItem = DxvkStateCacheEntry;
@@ -113,6 +138,11 @@ namespace dxvk {
     std::unordered_map<
       DxvkShaderKey, Rc<DxvkShader>,
       DxvkHash, DxvkEq> m_shaderMap;
+
+    // Apple port (LB_PIPE_LOG diagnostics): when each shader was registered, only with the log on
+    std::unordered_map<
+      DxvkShaderKey, high_resolution_clock::time_point,
+      DxvkHash, DxvkEq> m_shaderTimes;
 
     dxvk::mutex                       m_workerLock;
     dxvk::condition_variable          m_workerCond;

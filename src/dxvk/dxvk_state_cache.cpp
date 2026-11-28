@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <cstring>
+
 #include "dxvk_device.h"
 #include "dxvk_pipemanager.h"
 #include "dxvk_state_cache.h"
@@ -6,6 +9,15 @@ namespace dxvk {
 
   static const Sha1Hash       g_nullHash      = Sha1Hash::compute(nullptr, 0);
   static const DxvkShaderKey  g_nullShaderKey = DxvkShaderKey();
+
+
+  uint32_t dxvkPipeLogLevel() {
+    static const uint32_t level = [] {
+      std::string e = env::getEnvVar("LB_PIPE_LOG");
+      return e.empty() || e[0] < '0' || e[0] > '9' ? 0u : uint32_t(e[0] - '0');
+    }();
+    return level;
+  }
 
 
   /**
@@ -279,6 +291,8 @@ namespace dxvk {
     // Add the shader so we can look it up by its key
     std::unique_lock<dxvk::mutex> entryLock(m_entryLock);
     m_shaderMap.insert({ key, shader });
+    if (dxvkPipeLogLevel() >= 1)
+      m_shaderTimes.insert({ key, high_resolution_clock::now() });
 
     // Deferred lock, don't stall workers unless we have to
     std::unique_lock<dxvk::mutex> workerLock;
@@ -304,6 +318,124 @@ namespace dxvk {
 
     if (workerLock)
       m_workerCond.notify_all();
+  }
+
+
+  std::string DxvkStateCache::describeMiss(
+    const DxvkStateCacheKey&              shaders,
+    const DxvkGraphicsPipelineStateInfo&  state,
+    const DxvkRenderPassFormat&           format) {
+    // m_entries and m_entryMap are only written while reading the file in the constructor
+    auto entries = m_entryMap.equal_range(shaders);
+
+    size_t      count     = 0;
+    size_t      bestDiffs = ~size_t(0);
+    std::string bestText;
+
+    auto same = [] (const auto& a, const auto& b) {
+      return std::memcmp(&a, &b, sizeof(a)) == 0;
+    };
+
+    for (auto e = entries.first; e != entries.second; e++) {
+      const DxvkStateCacheEntry& entry = m_entries[e->second];
+      const DxvkGraphicsPipelineStateInfo& c = entry.gpState;
+      count += 1;
+
+      std::string text;
+      size_t      diffs = 0;
+      auto note = [&] (bool differs, const std::string& name) {
+        if (differs) {
+          text += (diffs++ ? "," : "") + name;
+        }
+      };
+
+      note(entry.format.viewMask != format.viewMask,
+        str::format("viewMask ", entry.format.viewMask, "->", format.viewMask));
+      note(entry.format.sampleCount != format.sampleCount, "samples");
+
+      bool rtDiffers = entry.format.depth.format != format.depth.format
+                    || entry.format.depth.layout != format.depth.layout;
+      for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+        rtDiffers |= entry.format.color[i].format != format.color[i].format
+                  || entry.format.color[i].layout != format.color[i].layout;
+      }
+      note(rtDiffers, "targets");
+
+      note(!same(c.bsBindingMask, state.bsBindingMask), "bindingMask");
+      note(!same(c.ia, state.ia), "ia");
+      note(!same(c.il, state.il), "il");
+      note(!same(c.rs, state.rs), "rs");
+      note(!same(c.ms, state.ms), "ms");
+      note(!same(c.ds, state.ds), "ds");
+      note(!same(c.om, state.om), "om");
+      note(!same(c.dsFront, state.dsFront) || !same(c.dsBack, state.dsBack), "stencil");
+      note(!same(c.omSwizzle, state.omSwizzle), "swizzle");
+      note(!same(c.omBlend, state.omBlend), "blend");
+      note(!same(c.ilAttributes, state.ilAttributes), "attrs");
+      note(!same(c.ilBindings, state.ilBindings), "vbindings");
+
+      for (uint32_t i = 0; i < MaxNumSpecConstants; i++) {
+        if (c.sc.specConstants[i] != state.sc.specConstants[i]) {
+          char buf[48];
+          std::snprintf(buf, sizeof(buf), "sc%u %x->%x", i, c.sc.specConstants[i], state.sc.specConstants[i]);
+          note(true, buf);
+        }
+      }
+
+      if (!diffs) {
+        bestDiffs = 0;
+        bestText.clear();
+        break;
+      }
+
+      if (diffs < bestDiffs) {
+        bestDiffs = diffs;
+        bestText  = std::move(text);
+      }
+    }
+
+    // Registration age of the youngest shader, and the compiler threads' backlog
+    std::string age;
+    { std::lock_guard<dxvk::mutex> lock(m_entryLock);
+      auto now = high_resolution_clock::now();
+      double youngest = -1.0;
+      bool   missing  = false;
+
+      for (const DxvkShaderKey* k : { &shaders.vs, &shaders.tcs, &shaders.tes, &shaders.gs, &shaders.fs }) {
+        if (k->eq(g_nullShaderKey))
+          continue;
+
+        auto t = m_shaderTimes.find(*k);
+        if (t == m_shaderTimes.end()) {
+          missing = true;
+          continue;
+        }
+
+        double ms = std::chrono::duration<double, std::milli>(now - t->second).count();
+        if (youngest < 0.0 || ms < youngest)
+          youngest = ms;
+      }
+
+      age = missing ? std::string("unregistered") : str::format(uint64_t(youngest), " ms");
+    }
+
+    size_t queued;
+    { std::lock_guard<dxvk::mutex> lock(m_workerLock);
+      queued = m_workerQueue.size();
+    }
+
+    std::string where = str::format("shaders ", age, ", queue ", queued, ", busy ", m_workerBusy.load());
+
+    if (!count) {
+      size_t vsUses = m_pipelineMap.count(shaders.vs);
+      size_t fsUses = m_pipelineMap.count(shaders.fs);
+      return str::format("cache: none (vs in ", vsUses, ", fs in ", fsUses, " entries; ", where, ")");
+    }
+
+    if (!bestDiffs)
+      return str::format("cache: exact of ", count, " (", where, ")");
+
+    return str::format("cache: differs of ", count, " [", bestText, "] (", where, ")");
   }
 
 

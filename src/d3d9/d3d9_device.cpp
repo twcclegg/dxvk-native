@@ -120,10 +120,18 @@ namespace dxvk {
     m_flags.set(D3D9DeviceFlag::DirtySharedPixelShaderData);
     m_flags.set(D3D9DeviceFlag::DirtyDepthBounds);
     m_flags.set(D3D9DeviceFlag::DirtyPointScale);
+
+    // Apple port: create the shaders of earlier runs in the background, so the state cache can
+    // compile their pipelines before the game first draws with them (D3D9ShaderModuleSet)
+    DxsoModuleInfo moduleInfo;
+    moduleInfo.options = m_dxsoOptions;
+    m_shaderModules->StartBytecodeCache(this, moduleInfo);
   }
 
 
   D3D9DeviceEx::~D3D9DeviceEx() {
+    m_shaderModules->StopBytecodeCache();
+
     Flush();
     SynchronizeCsThread();
 
