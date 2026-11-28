@@ -656,7 +656,8 @@ namespace dxvk {
       return m_dxvkDevice;
     }
 
-    /* Apple port (stereo): LB_STEREO_MULTIVIEW is set and the device has multiview enabled. */
+    /* Apple port (stereo): LB_STEREO_MULTIVIEW is set and the device has multiview enabled and layered rendering
+     * (maxFramebufferLayers >= 2). */
     /* LB_STEREO_DUP (dxso_util.h) is a mono timing switch: ignored with multiview, which already submits both
      * eyes in one draw. */
     bool IsStereoDupActive() const {

@@ -45,7 +45,12 @@ namespace dxvk {
 
     alphaTestWiggleRoom = options.alphaTestWiggleRoom;
 
-    stereoMultiview = DxsoStereoMultiviewRequested() && devFeatures.coreMultiview.multiview;
+    // Multiview renders both eyes into the two layers of one image, which needs layered rendering. MoltenVK
+    // reports multiview without it on the visionOS simulator; of the signals DXVK queries, only
+    // maxFramebufferLayers shows it (1 there). Creating a two-layer attachment then aborts. Without it, stay
+    // mono (D3D9DeviceEx::GetDeviceFeatures also leaves multiview off and logs why).
+    stereoMultiview = DxsoStereoMultiviewRequested() && devFeatures.coreMultiview.multiview
+                   && devInfo.core.properties.limits.maxFramebufferLayers >= 2;
   }
 
 }
