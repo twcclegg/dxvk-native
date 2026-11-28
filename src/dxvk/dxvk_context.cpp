@@ -2242,6 +2242,12 @@ namespace dxvk {
   void DxvkContext::replaceBuffer(
     const Rc<DxvkBuffer>&           buffer,
     const DxvkBufferSlice&          source) {
+    // A short source would leave the tail of a new slice with a recycled slice's old data
+    if (unlikely(source.length() < buffer->info().size)) {
+      Logger::err(str::format("DxvkContext::replaceBuffer: source has ", source.length(),
+        " bytes for a buffer of ", buffer->info().size));
+    }
+
     // Same reason as in updateBuffer: keep bound transform feedback counters intact
     if (m_flags.test(DxvkContextFlag::GpXfbActive))
       this->spillRenderPass(true);

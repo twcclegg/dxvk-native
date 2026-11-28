@@ -1320,6 +1320,7 @@ namespace dxvk {
     // Do a strong flush if the first render target is changed.
     FlushImplicit(RenderTargetIndex == 0 ? TRUE : FALSE);
     m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+    ShadowDepthBindingChanged();
 
     m_state.renderTargets[RenderTargetIndex] = rt;
 
@@ -1391,6 +1392,7 @@ namespace dxvk {
 
     FlushImplicit(FALSE);
     m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+    ShadowDepthBindingChanged();
 
     if (ds != nullptr) {
       float rValue = GetDepthBufferRValue(ds->GetCommonTexture()->GetFormatMapping().FormatColor);
@@ -1567,6 +1569,8 @@ namespace dxvk {
       // Clear depth if we need to.
       if (depthAspectMask != 0) {
         Rc<DxvkImageView> shadowDepth = ShadowDepthView();
+        if (unlikely(shadowDepth != nullptr) && !ShadowDepthClear(shadowDepth, alignment, offset, extent, depthAspectMask))
+          shadowDepth = nullptr;
         ClearImageView(alignment, offset, extent, shadowDepth != nullptr ? shadowDepth : m_state.depthStencil->GetDepthStencilView(),
           depthAspectMask, clearValueDepth);
       }
@@ -4799,13 +4803,33 @@ namespace dxvk {
     // stores and reloads all attachments (two-layer RGBA16F and D32S8 in stereo; about 80 passes per frame in a
     // Skyrim boss fight). Instead, replace the whole buffer's contents with a snapshot of the mapping buffer, which
     // holds the full contents unless the GPU wrote the buffer (DxvkContext::replaceBuffer). LB_RP_UPLOAD_MAX caps
-    // the snapshot size.
+    // the snapshot size (bytes, or with a K or M suffix; at most the upload ring's 1 MiB chunk, since larger
+    // allocations get a new buffer each time).
+    // Cost per upload, however small the dirty range: the whole buffer is copied on this thread and on the GPU,
+    // and takes that much of the upload ring. A buffer in use gets a new backing slice; DxvkBuffer keeps every
+    // slice it ever allocated, and the ring grows in the same way, so a buffer uploaded N times per frame keeps
+    // N to 2N slices per frame in flight for as long as it lives.
     static const VkDeviceSize s_uploadMax = [] () -> VkDeviceSize {
       const char* e = std::getenv("LB_RP_UPLOAD");
       if (!e || !*e || *e == '0')
         return 0;
+
+      constexpr VkDeviceSize ringChunk = 1u << 20;
+      VkDeviceSize max = ringChunk;
+
       const char* m = std::getenv("LB_RP_UPLOAD_MAX");
-      return m && *m ? VkDeviceSize(std::strtoull(m, nullptr, 10)) : VkDeviceSize(1u << 20);
+      if (m && *m) {
+        char* end = nullptr;
+        max = VkDeviceSize(std::strtoull(m, &end, 10));
+        if (*end == 'k' || *end == 'K')
+          max <<= 10;
+        else if (*end == 'm' || *end == 'M')
+          max <<= 20;
+      }
+
+      max = std::min(max, ringChunk);
+      Logger::info(str::format("LB_RP_UPLOAD: snapshot uploads for buffers of up to ", max, " bytes"));
+      return max;
     }();
 
     if (pResource->Desc()->Size <= s_uploadMax && !pResource->WasWrittenByGPU()) {
@@ -5765,20 +5789,24 @@ namespace dxvk {
   // Skyrim draws its shadow maps (one-layer render targets of 512x512 or 512x1024) with the scene's
   // depth-stencil surface bound, which is two-layer and 1600x1100 in stereo, and clears that surface
   // before each cascade. Each pass then loads and stores the whole surface, and each partial clear
-  // needs a pass of its own. With LB_RP_SHADOW_DS=1, a pass whose colour targets are all one-layer and
-  // smaller than a two-layer depth-stencil surface uses a private surface of the colour targets' size
-  // instead, for drawing and for clears. The scene's surface keeps the contents it had. The private
-  // surface is kept per size and format and shared by all such passes, whatever scene surface is
-  // bound; it starts undefined. A pass that tests against depth it did not clear, or a game that reads
-  // the shadow draws' depth from the scene surface, draws wrong. The trigger does not look at the depth
-  // test, so any small one-layer target (cube face, CreateRenderTarget surface) also gets it.
+  // needs a pass of its own. With LB_RP_SHADOW_DS=1, a pass whose colour targets are all one-layer,
+  // none of them a swap chain image, and not larger in either dimension than a two-layer depth-stencil
+  // surface (nor the same size) uses a private surface of the colour targets' size instead, for drawing
+  // and for clears. The scene's surface keeps the contents it had. The private surface is kept per size
+  // and format and shared by all such passes, whatever scene surface is bound; it starts undefined.
+  // So a binding of targets only keeps the private surface once a clear of all its aspects (depth and
+  // stencil) over its whole extent reaches it: a depth- or stencil-tested draw before that, or a
+  // partial clear, switches the binding back to the scene surface (ShadowDepthCheckDraw,
+  // ShadowDepthClear). A game that reads the shadow draws' depth from the scene surface still draws
+  // wrong. The trigger does not look at the depth test, so any small one-layer target (cube face,
+  // CreateRenderTarget surface) also gets it.
   Rc<DxvkImageView> D3D9DeviceEx::ShadowDepthView() {
     static const bool s_enabled = [] {
       const char* e = std::getenv("LB_RP_SHADOW_DS");
       return e && *e && *e != '0';
     }();
 
-    if (!s_enabled || !IsStereoMultiview() || m_state.depthStencil == nullptr || !m_boundRTs)
+    if (!s_enabled || m_shadowDepthRefused || !IsStereoMultiview() || m_state.depthStencil == nullptr || !m_boundRTs)
       return nullptr;
 
     const DxvkImageCreateInfo& dsInfo = m_state.depthStencil->GetCommonTexture()->GetImage()->info();
@@ -5792,7 +5820,10 @@ namespace dxvk {
       const DxvkImageCreateInfo& rtInfo = m_state.renderTargets[i]->GetCommonTexture()->GetImage()->info();
       const VkExtent3D rtExtent = m_state.renderTargets[i]->GetCommonTexture()->GetExtentMip(m_state.renderTargets[i]->GetSubresource());
 
-      if (m_state.renderTargets[i]->GetCommonTexture()->GetStereoLayers() != 1 || rtInfo.sampleCount != VK_SAMPLE_COUNT_1_BIT)
+      // The back buffer is one-layer unless LB_STEREO_PRESENT=1, and a scene depth-stencil larger than it
+      // is still two-layer (GetStereoLayerCount), so the size test alone would catch passes into it.
+      if (m_state.renderTargets[i]->GetCommonTexture()->GetStereoLayers() != 1 || rtInfo.sampleCount != VK_SAMPLE_COUNT_1_BIT
+       || m_state.renderTargets[i]->GetCommonTexture()->Desc()->IsBackBuffer)
         return nullptr;
 
       if (extent.width && (extent.width != rtExtent.width || extent.height != rtExtent.height))
@@ -5852,6 +5883,59 @@ namespace dxvk {
   }
 
 
+  bool D3D9DeviceEx::ShadowDepthClear(
+    const Rc<DxvkImageView>& view,
+          uint32_t           alignment,
+          VkOffset3D         offset,
+          VkExtent3D         extent,
+          VkImageAspectFlags aspects) {
+    if (m_shadowDepthCleared)
+      return true;
+
+    // Same test for a whole-image clear as Clear's ClearImageView
+    const VkExtent3D size = view->mipLevelExtent(0);
+    const bool whole = offset.x == 0 && offset.y == 0
+      && align(std::min(extent.width,  size.width),  alignment) == align(size.width,  alignment)
+      && align(std::min(extent.height, size.height), alignment) == align(size.height, alignment);
+
+    if (whole && aspects == view->info().aspect) {
+      m_shadowDepthCleared = true;
+      return true;
+    }
+
+    ShadowDepthRefuse(size, "a partial depth or stencil clear");
+    return false;
+  }
+
+
+  void D3D9DeviceEx::ShadowDepthCheckDraw() {
+    // Nothing has written the private surface in this binding yet: an untested draw cannot write depth
+    // or stencil, and a clear either covered everything (m_shadowDepthCleared) or was refused. So moving
+    // the binding to the scene surface here loses nothing.
+    const bool stencil = m_state.renderStates[D3DRS_STENCILENABLE]
+      && (m_shadowDepthBound->info().aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
+
+    if (!IsZTestEnabled() && !stencil)
+      return;
+
+    ShadowDepthRefuse(m_shadowDepthBound->mipLevelExtent(0), "a depth- or stencil-tested draw");
+    BindFramebuffer();
+  }
+
+
+  void D3D9DeviceEx::ShadowDepthRefuse(VkExtent3D size, const char* reason) {
+    m_shadowDepthRefused = true;
+    m_flags.set(D3D9DeviceFlag::DirtyFramebuffer);
+
+    static bool s_logged = false;
+    if (!s_logged) {
+      s_logged = true;
+      Logger::info(str::format("LB_RP_SHADOW_DS: ", reason, " came before a full depth and stencil clear of the ",
+        size.width, "x", size.height, " private surface; that binding uses the scene depth-stencil (logged once)"));
+    }
+  }
+
+
   void D3D9DeviceEx::BindFramebuffer() {
     m_flags.clr(D3D9DeviceFlag::DirtyFramebuffer);
 
@@ -5878,6 +5962,7 @@ namespace dxvk {
     }
 
     Rc<DxvkImageView> shadowDepth = ShadowDepthView();
+    m_shadowDepthBound = shadowDepth;
 
     if (shadowDepth != nullptr) {
       attachments.depth = { shadowDepth, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
@@ -6502,6 +6587,9 @@ namespace dxvk {
 
     if (m_flags.test(D3D9DeviceFlag::DirtyFramebuffer))
       BindFramebuffer();
+
+    if (unlikely(m_shadowDepthBound != nullptr) && !m_shadowDepthCleared)
+      ShadowDepthCheckDraw();
 
     if (m_flags.test(D3D9DeviceFlag::DirtyViewportScissor))
       BindViewportAndScissor();
