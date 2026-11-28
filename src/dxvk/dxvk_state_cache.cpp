@@ -11,6 +11,15 @@ namespace dxvk {
   static const DxvkShaderKey  g_nullShaderKey = DxvkShaderKey();
 
 
+  uint32_t dxvkPipeLogLevel() {
+    static const uint32_t level = [] {
+      std::string e = env::getEnvVar("LB_PIPE_LOG");
+      return e.empty() || e[0] < '0' || e[0] > '9' ? 0u : uint32_t(e[0] - '0');
+    }();
+    return level;
+  }
+
+
   /**
    * \brief Packed entry header
    */
@@ -282,7 +291,8 @@ namespace dxvk {
     // Add the shader so we can look it up by its key
     std::unique_lock<dxvk::mutex> entryLock(m_entryLock);
     m_shaderMap.insert({ key, shader });
-    m_shaderTimes.insert({ key, high_resolution_clock::now() });
+    if (dxvkPipeLogLevel() >= 1)
+      m_shaderTimes.insert({ key, high_resolution_clock::now() });
 
     // Deferred lock, don't stall workers unless we have to
     std::unique_lock<dxvk::mutex> workerLock;

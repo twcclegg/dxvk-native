@@ -68,8 +68,7 @@ namespace dxvk {
    * a draw waited for it ("at draw", on the CS thread) or the state cache's workers compiled it ahead. Lines land
    * between the frame-time lines of the frame they belong to, so hitches can be matched to compiles. */
   static bool pipeLogEnabled() {
-    static const bool on = [] { const char* e = std::getenv("LB_PIPE_LOG"); return e && *e == '1'; }();
-    return on;
+    return dxvkPipeLogLevel() >= 1;
   }
 
   static double pipeNowMs() {
