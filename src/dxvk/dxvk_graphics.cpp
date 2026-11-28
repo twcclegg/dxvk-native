@@ -153,8 +153,6 @@ namespace dxvk {
     }
   };
 
-  static thread_local bool t_stageAtDraw = false;
-
 
   bool dxvkPipelineNormalizeEnabled() {
     static const bool on = env::getEnvVar("DXVK_PIPELINE_NORMALIZE") != "0";
@@ -257,9 +255,7 @@ namespace dxvk {
       if (!instance) {
         // Keep pipeline object locked, at worst we're going to stall
         // a state cache worker and the current thread needs priority.
-        t_stageAtDraw = true;
-        instance = this->createInstance(state, renderPass);
-        t_stageAtDraw = false;
+        instance = this->createInstance(state, renderPass, true);
         if (pipeLogEnabled()) {
           const double ms = pipeNowMs() - t0;
           std::fprintf(stderr, "pipe compiled at draw: %.1f ms (lock wait %.1f ms) %s\n", ms, lockWaitMs,
@@ -301,7 +297,7 @@ namespace dxvk {
 
     if (!this->findInstance(state, renderPass)) {
       const double t0 = pipeLogEnabled() ? pipeNowMs() : 0.0;
-      this->createInstance(state, renderPass);
+      this->createInstance(state, renderPass, false);
       if (pipeLogEnabled())
         std::fprintf(stderr, "pipe compiled ahead: %.1f ms\n", pipeNowMs() - t0);
     }
@@ -310,8 +306,9 @@ namespace dxvk {
 
   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) {
-    VkPipeline pipeline = this->createPipeline(state, renderPass);
+    const DxvkRenderPass*                renderPass,
+          bool                           atDraw) {
+    VkPipeline pipeline = this->createPipeline(state, renderPass, atDraw);
 
     m_pipeMgr->m_numGraphicsPipelines += 1;
     return &(*m_pipelines.emplace(state, renderPass, pipeline));
@@ -332,7 +329,8 @@ namespace dxvk {
   
   VkPipeline DxvkGraphicsPipeline::createPipeline(
     const DxvkGraphicsPipelineStateInfo& state,
-    const DxvkRenderPass*                renderPass) const {
+    const DxvkRenderPass*                renderPass,
+          bool                           atDraw) const {
     if (Logger::logLevel() <= LogLevel::Debug) {
       Logger::debug("Compiling graphics pipeline...");
       this->logPipelineState(LogLevel::Debug, state);
@@ -644,7 +642,7 @@ namespace dxvk {
     VkPipeline pipeline = VK_NULL_HANDLE;
     const double ts2 = stages ? pipeNowMs() : 0.0;
     VkResult vr = m_vkd->vkCreateGraphicsPipelines(m_vkd->device(),
-      m_pipeMgr->m_cache->handle(), 1, &info, nullptr, &pipeline);
+      m_pipeMgr->getVkPipelineCache(atDraw), 1, &info, nullptr, &pipeline);
 
     if (stages) {
       const double ts3 = pipeNowMs();
@@ -684,7 +682,7 @@ namespace dxvk {
 #endif
 
       std::fprintf(stderr, "pipe stages: %s t %.0f total %.2f spv %.2f vk %.2f | %s | %s vm %u key %s\n",
-        t_stageAtDraw ? "draw" : "ahead", ts0, ts3 - ts0, ts1 - ts0, ts3 - ts2, mvk.c_str(),
+        atDraw ? "draw" : "ahead", ts0, ts3 - ts0, ts1 - ts0, ts3 - ts2, mvk.c_str(),
         solo ? "solo" : "overlap", passFormat.viewMask,
         DxvkStateCache::pipelineKey(getStateCacheKey(), state, passFormat).c_str());
     }

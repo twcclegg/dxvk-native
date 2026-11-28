@@ -21,6 +21,10 @@ namespace dxvk {
     /// when using the state cache
     int32_t numCompilerThreads;
 
+    /// Compile pipelines that a draw waits for
+    /// in their own Vulkan pipeline cache
+    bool drawPipelineCache;
+
     /// Shader-related options
     Tristate useRawSsbo;
 

@@ -9,6 +9,16 @@ namespace dxvk {
           DxvkRenderPassPool* passManager)
   : m_device    (device),
     m_cache     (new DxvkPipelineCache(device->vkd())) {
+    // Apple port: MoltenVK holds one lock per VkPipelineCache across SPIR-V to MSL and the MSL compile, so with one
+    // cache a draw that has to compile also waits for the compiler threads' compiles (hundreds of ms each when the
+    // OS Metal shader cache is empty). DXVK_PIPELINE_DRAW_CACHE=1 or =0 overrides dxvk.drawPipelineCache.
+    std::string drawCache = env::getEnvVar("DXVK_PIPELINE_DRAW_CACHE");
+
+    if (drawCache == "1" || (drawCache != "0" && device->config().drawPipelineCache)) {
+      m_drawCache = new DxvkPipelineCache(device->vkd());
+      Logger::info("DXVK: Compiling pipelines at draw time in their own pipeline cache");
+    }
+
     std::string useStateCache = env::getEnvVar("DXVK_STATE_CACHE");
     
     if (useStateCache != "0" && device->config().enableStateCache)
