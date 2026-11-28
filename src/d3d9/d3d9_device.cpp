@@ -7894,6 +7894,49 @@ namespace dxvk {
       return D3DERR_INVALIDCALL;
 
     const uint32_t layers = std::min(si.numLayers, di.numLayers);
+
+    // LB_DEPTH_COPY_FB=1: a full-screen draw per layer that samples the depth into the target, instead of
+    // image -> buffer -> image. The vertex shader picks the layer (VK_EXT_shader_viewport_index_layer; Metal has no
+    // geometry shaders) and the fragment shader gets it from a push constant, not gl_Layer, so it needs no Geometry
+    // capability. The target must be renderable (else copyImageFb renders into a temporary image and copies again)
+    // and its layers must fit one framebuffer.
+    static const bool s_fb = [] { const char* e = std::getenv("LB_DEPTH_COPY_FB"); return e && *e == '1'; }();
+    bool fb = false;
+    if (s_fb) {
+      const char* fallback = nullptr;
+      uint32_t    outcome  = 0;
+      if (!m_dxvkDevice->extensions().extShaderViewportIndexLayer) {
+        outcome = 1; fallback = "no VK_EXT_shader_viewport_index_layer";
+      } else if (!(di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+        outcome = 2; fallback = "target without colour attachment usage";
+      } else if (layers > m_dxvkDevice->properties().core.properties.limits.maxFramebufferLayers) {
+        outcome = 4; fallback = "more layers than maxFramebufferLayers";
+      } else {
+        outcome = 8; fb = true;
+      }
+      // One line per distinct outcome, so a later call that takes the other path is logged too.
+      static std::atomic<uint32_t> s_logged { 0u };
+      if (!(s_logged.load(std::memory_order_relaxed) & outcome) && !(s_logged.fetch_or(outcome) & outcome)) {
+        Logger::info(fb ? std::string("LB_DEPTH_COPY_FB: depth copied with a shader draw")
+                        : std::string("LB_DEPTH_COPY_FB: buffer copy (") + fallback + ")");
+      }
+    }
+    if (fb) {
+      EmitCs([
+        cSrc    = srcImage,
+        cDst    = dstImage,
+        cLayers = layers,
+        cExtent = VkExtent3D { si.extent.width, si.extent.height, 1u }
+      ] (DxvkContext* ctx) {
+        ctx->copyDepthToColorImage(
+          cDst, VkImageSubresourceLayers { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 },
+          cSrc, VkImageSubresourceLayers { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 },
+          cExtent);
+      });
+      dstTex->MarkAllWrittenByGPU();
+      return D3D_OK;
+    }
+
     const VkDeviceSize size = VkDeviceSize(si.extent.width) * si.extent.height * 4 * layers;
     if (m_depthCopyBuffer == nullptr || m_depthCopyBuffer->info().size < size) {
       DxvkBufferCreateInfo info;

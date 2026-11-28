@@ -26,6 +26,17 @@ namespace dxvk {
   };
 
   /**
+   * \brief Push constants for copies that take the layer from them
+   *
+   * Used with one draw per layer, so that the fragment
+   * shader does not have to read gl_Layer.
+   */
+  struct DxvkMetaCopyLayerArgs {
+    VkOffset2D offset;
+    uint32_t   layer;
+  };
+
+  /**
    * \brief Copy pipeline
    * 
    * Stores the objects for a single pipeline
@@ -48,16 +59,19 @@ namespace dxvk {
     VkImageViewType       viewType;
     VkFormat              format;
     VkSampleCountFlagBits samples;
+    VkBool32              layerFromPush;
 
     bool eq(const DxvkMetaCopyPipelineKey& other) const {
       return this->viewType == other.viewType
           && this->format   == other.format
-          && this->samples  == other.samples;
+          && this->samples  == other.samples
+          && this->layerFromPush == other.layerFromPush;
     }
 
     size_t hash() const {
       return (uint32_t(format)  << 8)
            ^ (uint32_t(samples) << 4)
+           ^ (uint32_t(layerFromPush) << 3)
            ^ (uint32_t(viewType));
     }
   };
@@ -139,12 +153,15 @@ namespace dxvk {
      * \param [in] viewType Image view type
      * \param [in] dstFormat Destination image format
      * \param [in] dstSamples Destination sample count
+     * \param [in] layerFromPush Colour copy with one draw per layer that
+     *    takes the layer from \ref DxvkMetaCopyLayerArgs, not gl_Layer
      * \returns Compatible pipeline for the operation
      */
     DxvkMetaCopyPipeline getPipeline(
             VkImageViewType       viewType,
             VkFormat              dstFormat,
-            VkSampleCountFlagBits dstSamples);
+            VkSampleCountFlagBits dstSamples,
+            bool                  layerFromPush = false);
 
     /**
      * \brief Creates pipeline for buffer image copy
@@ -170,6 +187,8 @@ namespace dxvk {
     FragShaders m_color;
     FragShaders m_depth;
     FragShaders m_depthStencil;
+
+    VkShaderModule m_colorLayerFromPush = VK_NULL_HANDLE;
 
     dxvk::mutex m_mutex;
 
@@ -197,7 +216,8 @@ namespace dxvk {
       const DxvkMetaCopyPipelineKey&  key) const;
     
     VkPipelineLayout createPipelineLayout(
-            VkDescriptorSetLayout     descriptorSetLayout) const;
+            VkDescriptorSetLayout     descriptorSetLayout,
+            uint32_t                  pushSize) const;
     
     VkPipeline createPipelineObject(
       const DxvkMetaCopyPipelineKey&  key,

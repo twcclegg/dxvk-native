@@ -19,6 +19,7 @@ dxvk_shaders = files([
   'shaders/dxvk_copy_buffer_image.comp',
   'shaders/dxvk_copy_color_1d.frag',
   'shaders/dxvk_copy_color_2d.frag',
+  'shaders/dxvk_copy_color_2d_layer.frag',
   'shaders/dxvk_copy_color_ms.frag',
   'shaders/dxvk_copy_depth_1d.frag',
   'shaders/dxvk_copy_depth_2d.frag',

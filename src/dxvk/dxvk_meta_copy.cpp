@@ -8,6 +8,7 @@
 #include <dxvk_copy_buffer_image.h>
 #include <dxvk_copy_color_1d.h>
 #include <dxvk_copy_color_2d.h>
+#include <dxvk_copy_color_2d_layer.h>
 #include <dxvk_copy_color_ms.h>
 #include <dxvk_copy_depth_1d.h>
 #include <dxvk_copy_depth_2d.h>
@@ -191,6 +192,7 @@ namespace dxvk {
       m_vkd->vkDestroyRenderPass(m_vkd->device(), pair.second.renderPass, nullptr);
     }
 
+    m_vkd->vkDestroyShaderModule(m_vkd->device(), m_colorLayerFromPush, nullptr);
     m_vkd->vkDestroyShaderModule(m_vkd->device(), m_depthStencil.fragMs, nullptr);
     m_vkd->vkDestroyShaderModule(m_vkd->device(), m_depthStencil.frag2D, nullptr);
     m_vkd->vkDestroyShaderModule(m_vkd->device(), m_depthStencil.frag1D, nullptr);
@@ -219,6 +221,7 @@ namespace dxvk {
       switch (srcFormat) {
         case VK_FORMAT_D16_UNORM:  return VK_FORMAT_R16_UNORM;
         case VK_FORMAT_D32_SFLOAT: return VK_FORMAT_R32_SFLOAT;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT: return VK_FORMAT_R32_SFLOAT;
         default:                   return VK_FORMAT_UNDEFINED;
       }
     }
@@ -239,13 +242,15 @@ namespace dxvk {
   DxvkMetaCopyPipeline DxvkMetaCopyObjects::getPipeline(
           VkImageViewType       viewType,
           VkFormat              dstFormat,
-          VkSampleCountFlagBits dstSamples) {
+          VkSampleCountFlagBits dstSamples,
+          bool                  layerFromPush) {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
     DxvkMetaCopyPipelineKey key;
     key.viewType = viewType;
     key.format   = dstFormat;
     key.samples  = dstSamples;
+    key.layerFromPush = layerFromPush;
     
     auto entry = m_pipelines.find(key);
     if (entry != m_pipelines.end())
@@ -375,7 +380,8 @@ namespace dxvk {
     DxvkMetaCopyPipeline pipeline;
     pipeline.renderPass = this->createRenderPass(key);
     pipeline.dsetLayout = this->createDescriptorSetLayout(key);
-    pipeline.pipeLayout = this->createPipelineLayout(pipeline.dsetLayout);
+    pipeline.pipeLayout = this->createPipelineLayout(pipeline.dsetLayout,
+      key.layerFromPush ? sizeof(DxvkMetaCopyLayerArgs) : sizeof(VkOffset2D));
     pipeline.pipeHandle = this->createPipelineObject(key, pipeline.pipeLayout, pipeline.renderPass);
     return pipeline;
   }
@@ -471,11 +477,12 @@ namespace dxvk {
 
   
   VkPipelineLayout DxvkMetaCopyObjects::createPipelineLayout(
-          VkDescriptorSetLayout     descriptorSetLayout) const {
+          VkDescriptorSetLayout     descriptorSetLayout,
+          uint32_t                  pushSize) const {
     VkPushConstantRange push;
     push.stageFlags             = VK_SHADER_STAGE_FRAGMENT_BIT;
     push.offset                 = 0;
-    push.size                   = sizeof(VkOffset2D);
+    push.size                   = pushSize;
 
     VkPipelineLayoutCreateInfo info;
     info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -547,7 +554,18 @@ namespace dxvk {
     if (!shaderSet)
       throw DxvkError("DxvkMetaCopyObjects: Unsupported aspect mask");
 
-    if (key.viewType == VK_IMAGE_VIEW_TYPE_1D_ARRAY)
+    if (key.layerFromPush) {
+      // Only the single-sampled 2D colour copy has this variant
+      if (aspect != VK_IMAGE_ASPECT_COLOR_BIT
+       || key.viewType != VK_IMAGE_VIEW_TYPE_2D_ARRAY
+       || key.samples != VK_SAMPLE_COUNT_1_BIT)
+        throw DxvkError("DxvkMetaCopyObjects: Unsupported copy for layer from push constants");
+
+      if (!m_colorLayerFromPush)
+        m_colorLayerFromPush = createShaderModule(dxvk_copy_color_2d_layer);
+
+      psStage.module = m_colorLayerFromPush;
+    } else if (key.viewType == VK_IMAGE_VIEW_TYPE_1D_ARRAY)
       psStage.module = shaderSet->frag1D;
     else if (key.samples == VK_SAMPLE_COUNT_1_BIT)
       psStage.module = shaderSet->frag2D;
