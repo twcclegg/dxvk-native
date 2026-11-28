@@ -828,6 +828,41 @@ namespace dxvk {
   }
   
   
+  void DxvkContext::copyDepthToColorImage(
+    const Rc<DxvkImage>&        dstImage,
+          VkImageSubresourceLayers dstSubresource,
+          VkOffset3D            dstOffset,
+    const Rc<DxvkImage>&        srcImage,
+          VkImageSubresourceLayers srcSubresource,
+          VkOffset3D            srcOffset,
+          VkExtent3D            extent) {
+    if (dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT
+     || srcSubresource.aspectMask != VK_IMAGE_ASPECT_DEPTH_BIT
+     || dstImage->info().type != VK_IMAGE_TYPE_2D
+     || dstImage->info().sampleCount != VK_SAMPLE_COUNT_1_BIT
+     || srcImage->info().sampleCount != VK_SAMPLE_COUNT_1_BIT) {
+      this->copyImage(
+        dstImage, dstSubresource, dstOffset,
+        srcImage, srcSubresource, srcOffset,
+        extent);
+      return;
+    }
+
+    this->spillRenderPass(true);
+
+    if (this->copyImageClear(dstImage, dstSubresource, dstOffset, extent, srcImage, srcSubresource))
+      return;
+
+    this->prepareImage(m_execBarriers, dstImage, vk::makeSubresourceRange(dstSubresource));
+    this->prepareImage(m_execBarriers, srcImage, vk::makeSubresourceRange(srcSubresource));
+
+    this->copyImageFb(
+      dstImage, dstSubresource, dstOffset,
+      srcImage, srcSubresource, srcOffset,
+      extent, true);
+  }
+  
+  
   void DxvkContext::copyImageRegion(
     const Rc<DxvkImage>&        dstImage,
           VkImageSubresourceLayers dstSubresource,
@@ -3488,7 +3523,8 @@ namespace dxvk {
     const Rc<DxvkImage>&        srcImage,
           VkImageSubresourceLayers srcSubresource,
           VkOffset3D            srcOffset,
-          VkExtent3D            extent) {
+          VkExtent3D            extent,
+          bool                  layerFromPush) {
     auto dstSubresourceRange = vk::makeSubresourceRange(dstSubresource);
     auto srcSubresourceRange = vk::makeSubresourceRange(srcSubresource);
     
@@ -3609,7 +3645,7 @@ namespace dxvk {
       tgtImage->isFullSubresource(tgtSubresource, extent));
     
     auto pipeInfo = m_common->metaCopy().getPipeline(
-      viewType, viewFormat, tgtImage->info().sampleCount);
+      viewType, viewFormat, tgtImage->info().sampleCount, layerFromPush);
     
     VkDescriptorImageInfo descriptorImage;
     descriptorImage.sampler          = VK_NULL_HANDLE;
@@ -3673,12 +3709,29 @@ namespace dxvk {
       srcOffset.x - tgtOffset.x,
       srcOffset.y - tgtOffset.y };
     
-    m_cmd->cmdPushConstants(pipeInfo.pipeLayout,
-      VK_SHADER_STAGE_FRAGMENT_BIT,
-      0, sizeof(srcCoordOffset),
-      &srcCoordOffset);
-    
-    m_cmd->cmdDraw(3, tgtSubresource.layerCount, 0, 0);
+    if (layerFromPush) {
+      // One draw per layer. The vertex shader takes the layer from the
+      // instance index, i.e. firstInstance, the fragment shader from the
+      // push constants.
+      DxvkMetaCopyLayerArgs layerArgs = { srcCoordOffset, 0u };
+
+      for (layerArgs.layer = 0; layerArgs.layer < tgtSubresource.layerCount; layerArgs.layer++) {
+        m_cmd->cmdPushConstants(pipeInfo.pipeLayout,
+          VK_SHADER_STAGE_FRAGMENT_BIT,
+          0, sizeof(layerArgs),
+          &layerArgs);
+
+        m_cmd->cmdDraw(3, 1, 0, layerArgs.layer);
+      }
+    } else {
+      m_cmd->cmdPushConstants(pipeInfo.pipeLayout,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+        0, sizeof(srcCoordOffset),
+        &srcCoordOffset);
+      
+      m_cmd->cmdDraw(3, tgtSubresource.layerCount, 0, 0);
+    }
+
     m_cmd->cmdEndRenderPass();
 
     if (srcLayout != srcImage->info().layout) {

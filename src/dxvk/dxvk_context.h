@@ -395,6 +395,31 @@ namespace dxvk {
             VkExtent3D            extent);
     
     /**
+     * \brief Copies a depth image to a colour image with a shader
+     *
+     * Like \ref copyImage for a depth source and a single-sampled 2D
+     * colour destination, but with one draw per layer: the copy shader
+     * takes the layer from push constants instead of reading gl_Layer,
+     * which needs the Geometry capability in a fragment shader. Other
+     * copies go to \ref copyImage.
+     * \param [in] dstImage Destination image
+     * \param [in] dstSubresource Destination subresource
+     * \param [in] dstOffset Destination area offset
+     * \param [in] srcImage Source image
+     * \param [in] srcSubresource Source subresource
+     * \param [in] srcOffset Source area offset
+     * \param [in] extent Size of the area to copy
+     */
+    void copyDepthToColorImage(
+      const Rc<DxvkImage>&        dstImage,
+            VkImageSubresourceLayers dstSubresource,
+            VkOffset3D            dstOffset,
+      const Rc<DxvkImage>&        srcImage,
+            VkImageSubresourceLayers srcSubresource,
+            VkOffset3D            srcOffset,
+            VkExtent3D            extent);
+    
+    /**
      * \brief Copies overlapping image region
      *
      * \param [in] dstImage The image
@@ -1184,7 +1209,8 @@ namespace dxvk {
       const Rc<DxvkImage>&        srcImage,
             VkImageSubresourceLayers srcSubresource,
             VkOffset3D            srcOffset,
-            VkExtent3D            extent);
+            VkExtent3D            extent,
+            bool                  layerFromPush = false);
     
     bool copyImageClear(
       const Rc<DxvkImage>&        dstImage,

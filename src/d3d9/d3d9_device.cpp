@@ -7895,9 +7895,11 @@ namespace dxvk {
 
     const uint32_t layers = std::min(si.numLayers, di.numLayers);
 
-    // LB_DEPTH_COPY_FB=1: one instanced full-screen draw that samples the depth into every layer, instead of
-    // image -> buffer -> image. It needs the layer from the vertex shader (no geometry shaders on Metal) and a
-    // target it can render to directly (else copyImageFb renders into a temporary image and copies again).
+    // LB_DEPTH_COPY_FB=1: a full-screen draw per layer that samples the depth into the target, instead of
+    // image -> buffer -> image. The vertex shader picks the layer (VK_EXT_shader_viewport_index_layer; Metal has no
+    // geometry shaders) and the fragment shader gets it from a push constant, not gl_Layer, so it needs no Geometry
+    // capability. The target must be renderable (else copyImageFb renders into a temporary image and copies again)
+    // and its layers must fit one framebuffer.
     static const bool s_fb = [] { const char* e = std::getenv("LB_DEPTH_COPY_FB"); return e && *e == '1'; }();
     const bool fb = s_fb && m_dxvkDevice->extensions().extShaderViewportIndexLayer
       && (di.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
@@ -7915,7 +7917,7 @@ namespace dxvk {
         cLayers = layers,
         cExtent = VkExtent3D { si.extent.width, si.extent.height, 1u }
       ] (DxvkContext* ctx) {
-        ctx->copyImage(
+        ctx->copyDepthToColorImage(
           cDst, VkImageSubresourceLayers { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 },
           cSrc, VkImageSubresourceLayers { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, cLayers }, VkOffset3D { 0, 0, 0 },
           cExtent);
