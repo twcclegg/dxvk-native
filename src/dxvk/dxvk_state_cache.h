@@ -170,7 +170,7 @@ namespace dxvk {
       DxvkShaderKey, Rc<DxvkShader>,
       DxvkHash, DxvkEq> m_shaderMap;
 
-    // Apple port (LB_PIPE_LOG diagnostics): when each shader was registered
+    // Apple port (LB_PIPE_LOG diagnostics): when each shader was registered, only with the log on
     std::unordered_map<
       DxvkShaderKey, high_resolution_clock::time_point,
       DxvkHash, DxvkEq> m_shaderTimes;

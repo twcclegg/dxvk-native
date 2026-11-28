@@ -14,6 +14,8 @@
 #include "dxvk_shader.h"
 #include "dxvk_stats.h"
 
+#include <optional>
+
 namespace dxvk {
 
   struct DxvkStateCacheKey;
@@ -31,8 +33,8 @@ namespace dxvk {
   /**
    * \brief Clears pipeline state that cannot change the pipeline
    *
-   * Blend and swizzle state of colour attachments the fragment shader does
-   * not write or the pass lacks, blend factors and ops with blending off,
+   * Blend state of colour attachments the fragment shader does not write
+   * or the pass lacks, the swizzle of outputs it does not write, blend factors and ops with blending off,
    * depth state without a depth attachment, depth compare and write with
    * the depth test off, stencil ops with the stencil test off, and the logic
    * op with logic ops off.
@@ -44,6 +46,21 @@ namespace dxvk {
           DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPassFormat&          format,
           uint32_t                       fsOutMask);
+
+  /**
+   * \brief Dynamic states of a graphics pipeline (Apple port)
+   *
+   * Taken from the state the pipeline was built with. With pipeline
+   * state normalization that can have fewer dynamic states than the
+   * context's state, and setting a state the pipeline holds as static
+   * is invalid (and can leave blend constants stale).
+   */
+  struct DxvkGraphicsPipelineDynamicState {
+    bool blendConstants = false;
+    bool depthBias      = false;
+    bool depthBounds    = false;
+    bool stencilRef     = false;
+  };
   
   class DxvkDevice;
   class DxvkPipelineManager;
@@ -228,11 +245,14 @@ namespace dxvk {
      * state. If necessary, a new pipeline will be created.
      * \param [in] state Pipeline state vector
      * \param [in] renderPass The render pass
+     * \param [out] dynamicState Dynamic states the pipeline
+     *    was built with (optional)
      * \returns Pipeline handle
      */
     VkPipeline getPipelineHandle(
       const DxvkGraphicsPipelineStateInfo&    state,
-      const DxvkRenderPass*                   renderPass);
+      const DxvkRenderPass*                   renderPass,
+            DxvkGraphicsPipelineDynamicState* dynamicState = nullptr);
     
     /**
      * \brief Compiles a pipeline
@@ -299,9 +319,9 @@ namespace dxvk {
     DxvkStateCacheKey getStateCacheKey() const;
 
     const DxvkGraphicsPipelineStateInfo& normalizeState(
-      const DxvkGraphicsPipelineStateInfo& state,
-      const DxvkRenderPass*                renderPass,
-            DxvkGraphicsPipelineStateInfo& scratch) const;
+      const DxvkGraphicsPipelineStateInfo&          state,
+      const DxvkRenderPass*                         renderPass,
+            std::optional<DxvkGraphicsPipelineStateInfo>& scratch) const;
 
     bool writePipelineStateToCache(
       const DxvkGraphicsPipelineStateInfo& state,

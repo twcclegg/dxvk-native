@@ -4346,6 +4346,13 @@ namespace dxvk {
       m_state.gp.state.ilBindings[i].setStride(m_state.vi.vertexStrides[binding]);
     }
     
+    // Retrieve the actual Vulkan pipeline handle. Apple port: with pipeline state
+    // normalization the pipeline can have fewer dynamic states than m_state.gp.state
+    // implies, so take them from the state the pipeline was built with.
+    DxvkGraphicsPipelineDynamicState dynamicState;
+    m_gpActivePipeline = m_state.gp.pipeline->getPipelineHandle(
+      m_state.gp.state, m_state.om.framebuffer->getRenderPass(), &dynamicState);
+
     // Check which dynamic states need to be active. States that
     // are not dynamic will be invalidated in the command buffer.
     m_flags.clr(DxvkContextFlag::GpDynamicBlendConstants,
@@ -4353,24 +4360,21 @@ namespace dxvk {
                 DxvkContextFlag::GpDynamicDepthBounds,
                 DxvkContextFlag::GpDynamicStencilRef);
     
-    m_flags.set(m_state.gp.state.useDynamicBlendConstants()
+    m_flags.set(dynamicState.blendConstants
       ? DxvkContextFlag::GpDynamicBlendConstants
       : DxvkContextFlag::GpDirtyBlendConstants);
     
-    m_flags.set(m_state.gp.state.useDynamicDepthBias()
+    m_flags.set(dynamicState.depthBias
       ? DxvkContextFlag::GpDynamicDepthBias
       : DxvkContextFlag::GpDirtyDepthBias);
     
-    m_flags.set(m_state.gp.state.useDynamicDepthBounds()
+    m_flags.set(dynamicState.depthBounds
       ? DxvkContextFlag::GpDynamicDepthBounds
       : DxvkContextFlag::GpDirtyDepthBounds);
     
-    m_flags.set(m_state.gp.state.useDynamicStencilRef()
+    m_flags.set(dynamicState.stencilRef
       ? DxvkContextFlag::GpDynamicStencilRef
       : DxvkContextFlag::GpDirtyStencilRef);
-    
-    // Retrieve and bind actual Vulkan pipeline handle
-    m_gpActivePipeline = m_state.gp.pipeline->getPipelineHandle(m_state.gp.state, m_state.om.framebuffer->getRenderPass());
 
     if (unlikely(!m_gpActivePipeline))
       return false;

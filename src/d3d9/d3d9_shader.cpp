@@ -1,5 +1,4 @@
 #include <chrono>
-#include <cstdio>
 #include "d3d9_shader.h"
 
 #include "d3d9_device.h"
@@ -100,11 +99,11 @@ namespace dxvk {
       : pDevice->GetPixelConstantLayout();
     // Apple port, LB_PIPE_STAGES=1: how long each shader the game creates takes to translate from DXSO to SPIR-V
     static const bool stageLog = env::getEnvVar("LB_PIPE_STAGES") == "1";
-    const auto tc0 = std::chrono::steady_clock::now();
+    const auto tc0 = stageLog ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
     m_shaders      = pModule->compile(*pDxsoModuleInfo, name, AnalysisInfo, constantLayout);
     if (stageLog)
-      std::fprintf(stderr, "dxso compile: %s %.2f ms\n", ShaderStage == VK_SHADER_STAGE_VERTEX_BIT ? "vs" : "ps",
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc0).count());
+      std::fprintf(stderr, "dxso compile: %s %.2f ms %s\n", ShaderStage == VK_SHADER_STAGE_VERTEX_BIT ? "vs" : "ps",
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tc0).count(), name.c_str());
     m_isgn         = pModule->isgn();
     m_usedSamplers = pModule->usedSamplers();
 
@@ -141,6 +140,10 @@ namespace dxvk {
       m_shaders[0]->dump(dumpStream);
     }
 
+  }
+
+
+  void D3D9CommonShader::RegisterShaders(D3D9DeviceEx* pDevice) const {
     pDevice->GetDXVKDevice()->registerShader(m_shaders[0]);
 
     if (m_shaders[1] != nullptr)
@@ -171,19 +174,43 @@ namespace dxvk {
       ShaderStage,
       Sha1Hash::compute(pShaderBytecode, info.bytecodeByteLength));
 
-    // Use the shader's unique key for the lookup
+    // Use the shader's unique key for the lookup. Apple port: if another thread is
+    // creating the same module (the bytecode cache thread and the game often ask for
+    // the same shader at the same time), wait for it instead of compiling it twice.
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
-      
-      auto entry = m_modules.find(lookupKey);
-      if (entry != m_modules.end()) {
-        *pShaderModule = entry->second;
-        return;
+
+      while (true) {
+        auto entry = m_modules.find(lookupKey);
+        if (entry != m_modules.end()) {
+          *pShaderModule = entry->second;
+          return;
+        }
+
+        if (m_modulesInFlight.insert(lookupKey).second)
+          break;
+
+        m_moduleCond.wait(lock);
       }
     }
+
+    // Releases the claim on the key however this returns, so waiting threads
+    // look again (and compile the shader themselves if this attempt failed)
+    struct InFlightClaim {
+      D3D9ShaderModuleSet* set;
+      const DxvkShaderKey& key;
+
+      ~InFlightClaim() {
+        { std::unique_lock<dxvk::mutex> lock(set->m_mutex);
+          set->m_modulesInFlight.erase(key);
+        }
+
+        set->m_moduleCond.notify_all();
+      }
+    } claim = { this, lookupKey };
     
     // This shader has not been compiled yet, so we have to create a
     // new module. This takes a while, so we won't lock the structure.
-    *pShaderModule = D3D9CommonShader(
+    D3D9CommonShader newModule(
       pDevice, ShaderStage, lookupKey,
       pDxbcModuleInfo, pShaderBytecode,
       info, &module);
@@ -193,12 +220,18 @@ namespace dxvk {
     // that object instead and discard the newly created module.
     { std::unique_lock<dxvk::mutex> lock(m_mutex);
       
-      auto status = m_modules.insert({ lookupKey, *pShaderModule });
+      auto status = m_modules.insert({ lookupKey, newModule });
       if (!status.second) {
         *pShaderModule = status.first->second;
         return;
       }
     }
+
+    // Only the module that went into the table is registered with the state cache,
+    // whose pipelines are keyed by the DxvkShader object: a pipeline compiled ahead
+    // for a discarded duplicate would never be used.
+    newModule.RegisterShaders(pDevice);
+    *pShaderModule = newModule;
 
     AppendBytecode(ShaderStage, lookupKey, pShaderBytecode, info.bytecodeByteLength);
   }
@@ -267,6 +300,13 @@ namespace dxvk {
           DxvkShaderKey key(VkShaderStageFlagBits(entry.stage), entry.hash);
           if (m_cachedKeys.insert(key).second)
             shaders.emplace_back(VkShaderStageFlagBits(entry.stage), std::move(code));
+        }
+
+        // A file cut off inside an entry header: appending after the stray bytes
+        // would misalign every entry this run adds
+        if (!rewrite && file.gcount() != 0) {
+          Logger::warn("D3D9: Bytecode cache: truncated entry, rewriting the file");
+          rewrite = true;
         }
       }
     }
@@ -343,6 +383,30 @@ namespace dxvk {
 
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(dxvk::high_resolution_clock::now() - t0);
     Logger::info(str::format("D3D9: Bytecode cache: created ", created, " shaders in ", ms.count(), " ms"));
+
+    // Then wait for the state cache's compiler threads to go idle: having all of these shaders, they compile
+    // every pipeline in the state cache file, and this line shows what that replay costs on each launch.
+    // The pipeline count includes pipelines the game compiled at draw time meanwhile.
+    Rc<DxvkDevice> device = pDevice->GetDXVKDevice();
+    uint64_t pipelines0 = device->getStatCounters().getCtr(DxvkStatCounter::PipeCountGraphics);
+
+    while (true) {
+      // Sleep first: a compiler thread woken for the last queued shader set may not count as busy yet
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+      if (m_stopCaching.load())
+        return;
+
+      DxvkStatCounters counters = device->getStatCounters();
+
+      if (!counters.getCtr(DxvkStatCounter::PipeCompilerBusy)) {
+        auto drained = std::chrono::duration_cast<std::chrono::milliseconds>(dxvk::high_resolution_clock::now() - t0);
+        Logger::info(str::format("D3D9: Bytecode cache: state cache compiler threads idle ", drained.count(),
+          " ms after shader creation started, ", counters.getCtr(DxvkStatCounter::PipeCountGraphics) - pipelines0,
+          " graphics pipelines compiled meanwhile"));
+        return;
+      }
+    }
   }
 
 
