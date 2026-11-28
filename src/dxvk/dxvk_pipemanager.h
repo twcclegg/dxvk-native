@@ -102,6 +102,11 @@ namespace dxvk {
      * waits for get a cache of their own, so they don't wait
      * for the compiler threads on a driver that locks the
      * cache while compiling. Otherwise all use one cache.
+     *
+     * The draw cache must stay internally synchronized (never
+     * created with VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT):
+     * besides the CS thread, the present path compiles through it
+     * on the app thread (swapchain blitter, HUD), at the same time.
      * \param [in] atDraw Whether a draw waits for the pipeline
      * \returns Pipeline cache handle
      */
